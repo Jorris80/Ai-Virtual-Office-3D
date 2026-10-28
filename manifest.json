@@ -1,0 +1,17 @@
+{
+  "name": "AI Virtual Office 3D",
+  "short_name": "AI Office",
+  "description": "Kantor virtual 3D dengan karyawan AI: rencana, eksekusi, QA, dan serah terima hasil kerja.",
+  "lang": "id",
+  "start_url": "./index.html#/office",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1730",
+  "theme_color": "#0b1730",
+  "categories": ["business", "productivity"],
+  "icons": [
+    { "src": "icon.png", "sizes": "192x192 512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,40 @@
+/* AI Virtual Office 3D — Service Worker (mode offline / PWA) */
+'use strict';
+var VERSION = 'avo-v1.0.0';
+var SHELL = ['./', './index.html', './app.js', './manifest.json', './icon.png'];
+var CDN = ['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'];
+
+self.addEventListener('install', function (e) {
+  e.waitUntil(caches.open(VERSION).then(function (c) {
+    return c.addAll(SHELL).then(function () {
+      return Promise.all(CDN.map(function (u) { return fetch(u, { mode: 'cors' }).then(function (r) { if (r.ok) return c.put(u, r); }).catch(function () { }); }));
+    });
+  }));
+});
+self.addEventListener('activate', function (e) {
+  e.waitUntil(caches.keys().then(function (ks) { return Promise.all(ks.filter(function (k) { return k !== VERSION; }).map(function (k) { return caches.delete(k); })); }).then(function () { return self.clients.claim(); }));
+});
+self.addEventListener('message', function (e) { if (e.data === 'skipWaiting') self.skipWaiting(); });
+
+self.addEventListener('fetch', function (e) {
+  var req = e.request, url = new URL(req.url);
+  if (req.method !== 'GET') return;                                  // API (POST) tidak pernah di-cache oleh SW
+  if (/script\.google(usercontent)?\.com$/.test(url.hostname)) return;   // data API: cache aplikasi di localStorage
+  if (req.mode === 'navigate') {                                     // network-first untuk halaman
+    e.respondWith(fetch(req).then(function (r) { var cp = r.clone(); caches.open(VERSION).then(function (c) { c.put('./index.html', cp); }); return r; })
+      .catch(function () { return caches.match('./index.html'); }));
+    return;
+  }
+  if (url.origin === location.origin) {                               // stale-while-revalidate aset sendiri
+    e.respondWith(caches.match(req).then(function (hit) {
+      var net = fetch(req).then(function (r) { if (r.ok) { var cp = r.clone(); caches.open(VERSION).then(function (c) { c.put(req, cp); }); } return r; }).catch(function () { return hit; });
+      return hit || net;
+    }));
+    return;
+  }
+  if (/cdnjs\.cloudflare\.com|fonts\.(googleapis|gstatic)\.com/.test(url.hostname)) { // cache-first CDN & font
+    e.respondWith(caches.match(req).then(function (hit) {
+      return hit || fetch(req).then(function (r) { if (r.ok || r.type === 'opaque') { var cp = r.clone(); caches.open(VERSION).then(function (c) { c.put(req, cp); }); } return r; });
+    }));
+  }
+});
