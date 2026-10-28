@@ -1,6 +1,6 @@
 /* AI Virtual Office 3D — Service Worker (mode offline / PWA) */
 'use strict';
-var VERSION = 'avo-v1.0.0';
+var VERSION = 'avo-v1.1.0';
 var SHELL = ['./', './index.html', './app.js', './manifest.json', './icon.png'];
 var CDN = ['https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'];
 

@@ -5,7 +5,9 @@
  */
 (function () {
   'use strict';
-  var VERSION = '1.0.0';
+  var VERSION = '1.1.0';
+  var BUILD_DATE = '2026-10-28';
+  var LEGAL_V = { terms: '2026.10', privacy: '2026.10', effective: '2026-10-28' };
   var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbyN6Dbkg8jldepFbJ9WTZqznskpyW5-mC7CVRPDIwUJfKnfqMoH_V4bgTX7uMf5w-_X/exec'; // opsional: isi URL Web App (…/exec) saat build untuk klien
   var IS_GAS = !!(window.google && google.script && google.script.run);
 
@@ -59,13 +61,32 @@
   function cacheKey(path, query) { return 'c:' + path + '?' + JSON.stringify(query || {}); }
   var OUTBOX_OK = ['POST /tasks', 'POST /notifications/read'];
 
+  function userKey() { return S.me ? S.me.user.id + '@' + S.me.org.id : ''; }
+  function cacheGet(path, query) { var e = store.get(cacheKey(path, query)); return e && e.t && e.u === userKey() ? e : null; }
+  function cachePut(path, query, data) { var s = JSON.stringify(data); if (s.length < 400000) store.set(cacheKey(path, query), { t: Date.now(), u: userKey(), d: data }); }
+  function clearDataCache() { try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf('avo_c:') === 0) localStorage.removeItem(k); }); } catch (e) { } }
+  var inflight = {};
+  /** Stale-while-revalidate: tampilkan data tersimpan seketika, segarkan di latar belakang. */
+  function revalidate(req, path, opts, ent) {
+    var k = cacheKey(path, opts.query); if (inflight[k]) return; inflight[k] = 1;
+    var view = S.view;
+    send(req).then(function (res) {
+      if (!res || !res.ok) { if (res && res.error && res.error.code === 'UNAUTHENTICATED') logoutLocal(); if (res && res.error && res.error.code === 'LEGAL_REQUIRED') showLegalGate(); return; }
+      cachePut(path, opts.query, res.data);
+      if (JSON.stringify(res.data) !== JSON.stringify(ent.d) && view === S.view) softRefresh();
+    }).catch(function () { }).then(function () { delete inflight[k]; });
+  }
   function api(method, path, body, opts) {
     opts = opts || {};
     var req = { method: method, path: '/api/v1' + path, body: body || {}, query: opts.query || {}, token: S.token, idempotency_key: opts.idem || '', ua: navigator.userAgent.slice(0, 150) };
+    if (method === 'GET' && !opts.noCache && S.token && (S.online || IS_GAS)) {
+      var ent = cacheGet(path, opts.query);
+      if (ent) { if (Date.now() - ent.t > 4000) revalidate(req, path, opts, ent); return Promise.resolve(ent.d); }
+    }
     if (!S.online && !IS_GAS) {
       if (method === 'GET') {
-        var c = store.get(cacheKey(path, opts.query));
-        if (c) return Promise.resolve(Object.assign({ __offline: true }, c));
+        var c = cacheGet(path, opts.query);
+        if (c) return Promise.resolve(c.d);
         return Promise.reject(Object.assign(new Error('Offline: data belum tersimpan di perangkat.'), { code: 'OFFLINE' }));
       }
       if (OUTBOX_OK.indexOf(method + ' ' + path) >= 0) {
@@ -78,9 +99,10 @@
       if (!res || !res.ok) {
         var err = (res && res.error) || { code: 'INTERNAL', message: 'Respons server tidak valid.' };
         if (err.code === 'UNAUTHENTICATED' && path !== '/auth/login') { logoutLocal(); }
+        if (err.code === 'LEGAL_REQUIRED') showLegalGate();
         throw Object.assign(new Error(err.message), { code: err.code, details: err.details });
       }
-      if (method === 'GET' && !opts.noCache) { var s = JSON.stringify(res.data); if (s.length < 400000) store.set(cacheKey(path, opts.query), res.data); }
+      if (method === 'GET' && !opts.noCache && S.token) cachePut(path, opts.query, res.data);
       return res.data;
     });
   }
@@ -248,12 +270,16 @@
       (setup ? '<label class="f">Nama organisasi<input class="i" name="org_name" required maxlength="100" placeholder="PT Contoh Sejahtera"></label><label class="f">Nama Anda<input class="i" name="name" required maxlength="80"></label>' : '') +
       '<label class="f">Email<input class="i" type="email" name="email" required autocomplete="username"></label>' +
       '<label class="f">Kata sandi<input class="i" type="password" name="password" required minlength="8" autocomplete="' + (setup ? 'new-password' : 'current-password') + '"><span>' + (setup ? 'Minimal 8 karakter, berisi huruf dan angka.' : '') + '</span></label>' +
+      (setup ? '<label class="row small" style="gap:8px;align-items:flex-start"><input type="checkbox" name="accept_legal" id="lgLegal" required style="margin-top:3px"><span>Saya telah membaca dan menyetujui <a href="#" data-legal="terms">Syarat &amp; Ketentuan</a> serta <a href="#" data-legal="privacy">Pemberitahuan Privasi</a>.</span></label>' : '') +
       '<button class="btn primary" style="justify-content:center;padding:11px" id="lgBtn">' + (setup ? 'Buat & masuk' : 'Masuk') + '</button></form>' +
+      '<div class="small muted" style="margin-top:14px;text-align:center"><a href="#" data-legal="terms">Syarat &amp; Ketentuan</a> · <a href="#" data-legal="privacy">Pemberitahuan Privasi</a> · v' + VERSION + '</div>' +
       (IS_GAS ? '' : '<details style="margin-top:14px" ' + (needsServer ? 'open' : '') + '><summary class="small muted" style="cursor:pointer">Pengaturan server</summary><label class="f" style="margin-top:8px">URL Web App GAS<input class="i" id="srvUrl" placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(apiUrl()) + '"><span>Dari Deploy → Web app di Apps Script.</span></label><button class="btn sm" id="srvSave" style="margin-top:8px">Simpan & cek koneksi</button><div id="srvMsg" class="small" style="margin-top:6px"></div></details>') +
       '</div></div></div>';
     $('#lgLogo').onclick = function () { zoomImage(this.src, 'Logo'); };
+    bindLegalLinks($('#app'));
     $('#lgForm').onsubmit = function (e) {
       e.preventDefault(); var f = new FormData(this), b = {}; f.forEach(function (v, k) { b[k] = v; });
+      if (setup) { if (!$('#lgLegal').checked) return fail(new Error('Setujui Syarat & Ketentuan dan Pemberitahuan Privasi.')); b.accept_legal = true; }
       var btn = $('#lgBtn'); btn.disabled = true; btn.textContent = 'Memproses…';
       api('POST', setup ? '/auth/bootstrap' : '/auth/login', b).then(onLogin).catch(function (er) { fail(er); btn.disabled = false; btn.textContent = setup ? 'Buat & masuk' : 'Masuk'; });
     };
@@ -262,12 +288,56 @@
       var u = $('#srvUrl').value.trim();
       if (u && !/^https:\/\/script\.google(usercontent)?\.com\//.test(u)) { $('#srvMsg').textContent = 'URL harus diawali https://script.google.com/…'; return; }
       store.set('api_url', u); $('#srvMsg').textContent = 'Mengecek…';
-      api('GET', '/health', {}, { noCache: true }).then(function (h) { $('#srvMsg').innerHTML = '<span style="color:var(--success)">✔ Terhubung: ' + esc(h.app) + ' v' + esc(h.version) + '</span>'; renderLogin(h); }).catch(function (er) { $('#srvMsg').innerHTML = '<span style="color:var(--danger)">' + esc(er.message) + '</span>'; });
+      api('GET', '/health', {}, { noCache: true }).then(function (h) { store.set('health', h); $('#srvMsg').innerHTML = '<span style="color:var(--success)">✔ Terhubung: ' + esc(h.app) + ' v' + esc(h.version) + '</span>'; renderLogin(h); }).catch(function (er) { $('#srvMsg').innerHTML = '<span style="color:var(--danger)">' + esc(er.message) + '</span>'; });
     };
   }
-  function onLogin(d) { S.token = d.token; store.set('session', { token: d.token, expires_at: d.expires_at }); S.me = d.me; store.set('me', d.me); bootApp(); }
-  function logoutLocal() { S.token = null; S.me = null; store.del('session'); store.del('me'); stopPoll(); if (S.office) { S.office.destroy(); S.office = null; } start(); }
-  function logout() { api('POST', '/auth/logout').catch(function () { }).then(logoutLocal); }
+  function onLogin(d) { var h = store.get('health', {}) || {}; h.needs_setup = false; store.set('health', h); S.token = d.token; store.set('session', { token: d.token, expires_at: d.expires_at }); S.me = d.me; store.set('me', d.me); bootApp(true); }
+  function logoutLocal() {
+    S.token = null; S.me = null; S.seq = 0; S.events = []; S.statuses = {}; S.employees = []; S.view = '';
+    store.del('session'); store.del('me'); store.del('outbox'); clearDataCache(); stopPoll();
+    if (S.office) { S.office.destroy(); S.office = null; } S.officeRoot = null;
+    $$('.modal-bg,.drawer,.lightbox').forEach(function (x) { x.remove(); });
+    renderLogin(store.get('health', { needs_setup: false }));
+  }
+  /** Keluar instan: UI langsung kembali ke login, pencabutan sesi dikirim di latar belakang. */
+  function logout() {
+    var tok = S.token; logoutLocal();
+    if (tok) send({ method: 'POST', path: '/api/v1/auth/logout', body: {}, token: tok }).catch(function () { });
+  }
+
+  // ---------------- dokumen hukum ----------------
+  var LEGAL_TEXT = { terms: "# Syarat & Ketentuan Penggunaan\n**Versi {TERMS_V} \u00b7 berlaku sejak {EFFECTIVE}**\n\nDengan membuat akun, masuk, atau menggunakan AI Virtual Office 3D (\"Aplikasi\") di lingkungan {ORG} (\"Organisasi\"), Anda menyetujui Syarat & Ketentuan ini. Bila tidak setuju, jangan gunakan Aplikasi.\n\n## 1. Para pihak\n- **Organisasi** adalah pemegang lisensi yang memasang Aplikasi di akun Google miliknya dan mengundang pengguna.\n- **Pengguna** adalah orang yang diberi akun oleh Organisasi (pemilik, admin, manajer, anggota, peninjau).\n- **Penyedia** adalah {PROVIDER} yang mengembangkan dan melisensikan Aplikasi.\n\n## 2. Layanan\nAplikasi menyediakan kantor virtual berisi karyawan AI yang menyusun rencana, menjalankan tugas melalui antrean, memeriksa mutu, dan menghasilkan artefak (dokumen, tabel, draf email, draf undangan rapat). Data disimpan di Google Sheets/Drive milik Organisasi. Fitur AI hanya aktif bila Organisasi mengonfigurasi penyedia AI.\n\n## 3. Akun & keamanan\n- Jaga kerahasiaan kata sandi; Anda bertanggung jawab atas aktivitas di akun Anda.\n- Segera laporkan dugaan akses tidak sah kepada administrator Organisasi.\n- Hak akses mengikuti peran yang ditetapkan Organisasi. Jangan mencoba mengakses data di luar kewenangan Anda.\n\n## 4. Penggunaan yang dapat diterima\nAnda dilarang:\n- mengunggah atau memproses konten yang melanggar hukum, hak kekayaan intelektual, atau hak privasi orang lain;\n- memasukkan data pribadi pihak lain tanpa dasar hukum yang sah, atau data pribadi spesifik (kesehatan, biometrik, keuangan pribadi, data anak) kecuali benar-benar diperlukan dan diizinkan Organisasi;\n- membobol, memindai, atau membebani sistem, termasuk mencoba memanipulasi karyawan AI (prompt injection) untuk melewati kontrol;\n- menggunakan Aplikasi untuk spam, penipuan, atau keputusan yang merugikan orang lain tanpa peninjauan manusia.\n\n## 5. Keluaran AI\n- Keluaran AI dapat tidak akurat, tidak lengkap, atau tidak sesuai konteks. **Anda wajib meninjau setiap hasil** sebelum dipakai atau dibagikan.\n- Aplikasi tidak pernah mengirim email, memublikasikan konten, atau melakukan transaksi secara otomatis. Draf email memerlukan persetujuan manusia dan tetap harus dikirim sendiri oleh pengguna.\n- Tanggung jawab atas penggunaan hasil kerja berada pada pengguna dan Organisasi.\n\n## 6. Layanan pihak ketiga\nAplikasi berjalan di atas layanan Google (Apps Script, Sheets, Drive, Docs) dan, bila diaktifkan, penyedia AI (mis. Google Gemini atau layanan kompatibel OpenAI). Ketentuan dan kebijakan privasi pihak ketiga tersebut turut berlaku. Biaya penggunaan API AI ditanggung Organisasi kecuali disepakati lain.\n\n## 7. Lisensi, paket & masa uji coba\nAplikasi dilisensikan, bukan dijual. Batas pengguna, tugas, karyawan AI, dan integrasi mengikuti paket lisensi Organisasi. Saat masa uji coba atau lisensi berakhir, Aplikasi beralih ke mode baca-saja.\n\n## 8. Kekayaan intelektual\nHak atas perangkat lunak Aplikasi tetap milik Penyedia. Konten yang Anda masukkan dan artefak yang dihasilkan untuk Organisasi menjadi milik Organisasi, sepanjang tidak melanggar hak pihak lain.\n\n## 9. Ketersediaan\nAplikasi bergantung pada kuota dan ketersediaan layanan Google serta penyedia AI. Tidak ada jaminan ketersediaan tanpa gangguan kecuali diatur dalam perjanjian layanan (SLA) tertulis.\n\n## 10. Batasan tanggung jawab\nSepanjang diizinkan hukum, Penyedia tidak bertanggung jawab atas kerugian tidak langsung, kehilangan keuntungan, atau kerugian akibat penggunaan keluaran AI tanpa peninjauan. Tanggung jawab total Penyedia dibatasi sesuai perjanjian lisensi dengan Organisasi.\n\n## 11. Penangguhan & pengakhiran\nOrganisasi dapat menangguhkan akun yang melanggar ketentuan ini. Penyedia dapat mencabut lisensi atas pelanggaran perjanjian lisensi.\n\n## 12. Perubahan ketentuan\nKetentuan dapat diperbarui. Versi baru ditandai dengan nomor versi dan Anda akan diminta menyetujuinya kembali sebelum melanjutkan.\n\n## 13. Hukum yang berlaku\nKetentuan ini tunduk pada hukum Republik Indonesia.\n\n## 14. Kontak\nPertanyaan tentang ketentuan ini: {CONTACT}.\n", privacy: "# Pemberitahuan Privasi\n**Versi {PRIV_V} \u00b7 berlaku sejak {EFFECTIVE}**\n\nPemberitahuan ini menjelaskan bagaimana data pribadi Anda diproses di AI Virtual Office 3D, sesuai Undang-Undang Nomor 27 Tahun 2022 tentang Pelindungan Data Pribadi (UU PDP).\n\n## 1. Pengendali & prosesor data\n- **Pengendali data pribadi:** {ORG}, yang menentukan tujuan pemrosesan dan memasang Aplikasi di akun Google miliknya.\n- **Prosesor data pribadi:** {PROVIDER} hanya bila menyediakan layanan pengelolaan/dukungan atas nama Organisasi; Google (infrastruktur) dan penyedia AI yang dipilih Organisasi memproses data sesuai ketentuan masing-masing.\n- **Kontak pelindungan data:** {CONTACT}.\n\n## 2. Data yang diproses\n| Kategori | Contoh | Sumber |\n|---|---|---|\n| Identitas akun | Nama, email, peran, status akun | Administrator / Anda |\n| Kredensial | Hash kata sandi bersalt (kata sandi asli tidak disimpan), token sesi dalam bentuk hash | Sistem |\n| Foto profil (opsional) | Gambar yang Anda unggah | Anda |\n| Konten kerja | Instruksi, dataset CSV, dokumen, artefak, draf email (termasuk alamat penerima), catatan persetujuan | Anda / tim |\n| Log & audit | Waktu login, aksi, hasil, ID perangkat lunak klien (user agent), riwayat eksekusi tugas | Sistem |\n| Penggunaan AI | Jumlah token, model, perkiraan biaya per tugas | Sistem |\n| Data di perangkat | Token sesi, cache data terakhir, antrean offline, preferensi tema | Browser Anda |\n\n## 3. Tujuan & dasar pemrosesan\n- Menyediakan layanan dan mengelola akun (pelaksanaan perjanjian kerja/layanan dengan Organisasi).\n- Keamanan, pencegahan penyalahgunaan, audit, dan pemecahan masalah (kepentingan yang sah).\n- Foto profil dan data opsional lain (persetujuan Anda; dapat dihapus kapan saja dari menu Profil).\n- Memenuhi kewajiban hukum Organisasi.\nAplikasi **tidak** digunakan untuk iklan, pemrofilan pemasaran, atau penjualan data.\n\n## 4. Pemrosesan oleh AI\nBila Organisasi mengaktifkan penyedia AI, instruksi dan potongan konten yang relevan dengan tugas dikirim ke penyedia AI tersebut untuk menghasilkan rencana, isi dokumen, atau penilaian mutu. Dalam mode berbasis aturan, tidak ada data yang dikirim ke penyedia AI. Keputusan AI tidak berlaku otomatis untuk tindakan eksternal: draf email dan hasil QA di bawah ambang memerlukan peninjauan manusia. Hindari memasukkan data pribadi yang tidak diperlukan ke dalam instruksi.\n\n## 5. Lokasi penyimpanan & transfer\nData disimpan di Google Sheets dan Google Drive milik Organisasi. Pusat data Google dan penyedia AI dapat berada di luar Indonesia; transfer lintas negara dilakukan dengan memperhatikan ketentuan transfer data pribadi dalam UU PDP. Data di perangkat Anda tersimpan di penyimpanan lokal browser dan dihapus saat Anda keluar (cache data) atau menghapus data situs.\n\n## 6. Retensi\n| Data | Masa simpan |\n|---|---|\n| Sesi login | Dihapus otomatis 30 hari setelah kedaluwarsa |\n| Event aktivitas tugas | 180 hari |\n| Audit log | Selama diperlukan Organisasi untuk akuntabilitas |\n| Akun, foto, konten kerja | Sampai dihapus/ditangguhkan oleh Organisasi atau atas permintaan yang sah |\n| Cadangan (backup) | Sesuai kebijakan backup Organisasi |\n\n## 7. Pembagian data\nData tidak dijual. Data hanya dibagikan kepada: Google sebagai penyedia infrastruktur; penyedia AI yang dikonfigurasi Organisasi; Penyedia Aplikasi untuk dukungan teknis bila diminta Organisasi; dan pihak berwenang bila diwajibkan peraturan perundang-undangan.\n\n## 8. Keamanan\nKata sandi di-hash bersalt, token sesi acak 256-bit disimpan dalam bentuk hash, kontrol akses berbasis peran, isolasi data antar-organisasi, pembatasan laju, audit log, Content Security Policy pada aplikasi web, dan koneksi terenkripsi HTTPS dari Google. Tidak ada sistem yang sepenuhnya bebas risiko; laporkan dugaan insiden ke kontak di atas.\n\n## 9. Hak Anda sebagai subjek data\nSesuai UU PDP, Anda berhak:\n- memperoleh informasi tentang pemrosesan data pribadi Anda;\n- mengakses dan memperoleh salinan data pribadi Anda;\n- memperbaiki data yang tidak akurat (nama dan foto dapat diubah langsung di menu Profil);\n- meminta penghapusan atau pemusnahan data, serta menarik persetujuan untuk data opsional;\n- mengajukan keberatan atas pengambilan keputusan yang semata-mata didasarkan pada pemrosesan otomatis;\n- meminta pembatasan atau penundaan pemrosesan sesuai ketentuan hukum.\nAjukan permintaan kepada {CONTACT}. Organisasi menanggapi dalam jangka waktu yang ditetapkan UU PDP.\n\n## 10. Kegagalan pelindungan data\nBila terjadi kegagalan pelindungan data pribadi, Organisasi selaku pengendali wajib menyampaikan pemberitahuan tertulis kepada subjek data dan lembaga paling lambat 3 \u00d7 24 jam (Pasal 46 UU PDP).\n\n## 11. Pengguna\nAplikasi ditujukan untuk pengguna dewasa dalam lingkungan kerja Organisasi.\n\n## 12. Penyimpanan lokal & cookie\nAplikasi tidak memakai cookie pelacak atau analitik pihak ketiga. Penyimpanan lokal browser dipakai untuk sesi, cache data agar aplikasi cepat dan dapat dibuka offline, antrean aksi offline, dan preferensi tampilan. Service worker menyimpan berkas aplikasi untuk mode offline.\n\n## 13. Perubahan\nPemberitahuan ini dapat diperbarui. Versi baru ditandai nomor versi dan Anda akan diminta menyetujuinya kembali.\n" };
+  function legalDoc(kind) {
+    var org = S.me ? S.me.org : null, li = (org && org.legal) || {};
+    return LEGAL_TEXT[kind].replace(/\{ORG\}/g, org ? org.name : 'organisasi pemegang lisensi')
+      .replace(/\{PROVIDER\}/g, li.provider_name || 'penyedia aplikasi')
+      .replace(/\{CONTACT\}/g, li.contact_email || 'administrator organisasi Anda')
+      .replace(/\{TERMS_V\}/g, LEGAL_V.terms).replace(/\{PRIV_V\}/g, LEGAL_V.privacy)
+      .replace(/\{EFFECTIVE\}/g, new Date(LEGAL_V.effective).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }));
+  }
+  function showLegal(kind) {
+    modal({ title: kind === 'terms' ? 'Syarat & Ketentuan' : 'Pemberitahuan Privasi', wide: true, noFocus: true, body: md(legalDoc(kind)),
+      buttons: [{ text: 'Unduh', fn: function () { download((kind === 'terms' ? 'syarat-ketentuan' : 'pemberitahuan-privasi') + '-v' + LEGAL_V[kind] + '.md', legalDoc(kind), 'text/markdown'); return false; } }, { text: 'Tutup', cls: 'primary' }] });
+  }
+  function bindLegalLinks(root) { $$('[data-legal]', root).forEach(function (a) { a.onclick = function (e) { e.preventDefault(); showLegal(a.getAttribute('data-legal')); }; }); }
+  var legalOpen = false;
+  /** Gerbang persetujuan: wajib saat akun baru atau versi dokumen berubah. */
+  function showLegalGate() {
+    if (legalOpen || !S.token) return; legalOpen = true;
+    var bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = '<div class="modal wide" role="dialog" aria-modal="true"><header><h2>Persetujuan diperlukan</h2></header><div class="body"><p class="muted">Sebelum melanjutkan, baca dan setujui dokumen berikut (versi ' + LEGAL_V.terms + ').</p><div class="tabs"><button class="on" data-lt="terms">Syarat &amp; Ketentuan</button><button data-lt="privacy">Pemberitahuan Privasi</button></div><div id="lgDoc" style="max-height:48vh;overflow:auto;border:1px solid var(--border);border-radius:10px;padding:12px 16px"></div>' +
+      '<label class="row small" style="gap:8px;margin-top:12px;flex-wrap:nowrap;align-items:flex-start"><input type="checkbox" id="lgAgree" style="margin-top:3px;flex:none"> Saya telah membaca dan menyetujui Syarat &amp; Ketentuan serta Pemberitahuan Privasi.</label></div><footer><button class="btn" id="lgOut">Keluar</button><button class="btn primary" id="lgOk" disabled>Setuju &amp; lanjutkan</button></footer></div>';
+    document.body.appendChild(bg);
+    var showTab = function (k) { $('#lgDoc', bg).innerHTML = md(legalDoc(k)); $('#lgDoc', bg).scrollTop = 0; $$('[data-lt]', bg).forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-lt') === k); }); };
+    $$('[data-lt]', bg).forEach(function (b) { b.onclick = function () { showTab(b.getAttribute('data-lt')); }; }); showTab('terms');
+    $('#lgAgree', bg).onchange = function () { $('#lgOk', bg).disabled = !this.checked; };
+    $('#lgOut', bg).onclick = function () { legalOpen = false; bg.remove(); logout(); };
+    $('#lgOk', bg).onclick = function () {
+      this.disabled = true;
+      api('POST', '/auth/accept-legal', { terms_version: LEGAL_V.terms, privacy_version: LEGAL_V.privacy }).then(function (l) { S.me.legal = l; store.set('me', S.me); legalOpen = false; bg.remove(); toast('Terima kasih. Persetujuan tercatat.', 'ok'); if (!location.hash || location.hash === '#/') location.hash = '#/office'; else route(); prefetch(); })
+        .catch(function (e) { fail(e); $('#lgOk', bg).disabled = false; });
+    };
+  }
 
   // ---------------- shell ----------------
   var NAV = [
@@ -281,7 +351,7 @@
     var nav = NAV.filter(function (n) { return can(n[3]); });
     $('#app').innerHTML = '<div class="shell"><aside class="side"><div class="brand"><img class="logo" id="sLogo" src="' + esc(logo) + '" alt="Logo"><div style="min-width:0"><b id="sTitle">' + esc(b.title) + '</b><span id="sSub">' + esc(b.subtitle) + '</span></div></div><nav class="nav">' +
       nav.map(function (n, i) { return (i === 4 ? '<div class="sec">Organisasi</div>' : '') + (i === 7 ? '<div class="sec">Kontrol</div>' : '') + '<a href="#/' + n[0] + '" data-nav="' + n[0] + '">' + ico(n[2]) + '<span>' + n[1] + '</span>' + (n[0] === 'approvals' ? '<i class="badge" id="bdAppr" hidden></i>' : '') + '</a>'; }).join('') +
-      '</nav><div style="margin-top:auto;padding:10px;font-size:11px;opacity:.55">v' + VERSION + (IS_GAS ? ' · GAS' : ' · PWA') + '</div></aside>' +
+      '</nav><a href="#/about" style="margin-top:auto;padding:10px;font-size:11px;opacity:.6;color:inherit;text-decoration:none">v' + VERSION + (IS_GAS ? ' · GAS' : ' · PWA') + ' · Tentang</a></aside>' +
       '<div class="main"><div id="offBar"></div><header class="top"><img class="logo" id="tLogo" src="' + esc(logo) + '" alt="Logo"><div class="ttl grow"><b><span id="tTitle">' + esc(b.title) + '</span>' + (can('org.manage') ? '<button class="btn ghost sm" id="editTitle" title="Ubah judul header" aria-label="Ubah judul">' + ico('pen', 14) + '</button>' : '') + '</b><small id="tSub">' + esc(b.subtitle) + ' · ' + esc(S.me.license.label || S.me.license.plan) + '</small></div>' +
       '<span class="chip hide-m" id="liveChip">Terhubung</span><button class="iconbtn" id="btnTheme" title="Tema" aria-label="Tema">' + ico('moon') + '</button><button class="iconbtn" id="btnBell" title="Notifikasi" aria-label="Notifikasi">' + ico('bell') + '<i class="badge" id="bdBell" hidden></i></button>' +
       '<button class="iconbtn" id="btnMe" style="width:auto;padding:0 2px;border:0" aria-label="Profil">' + avatarHtml(u) + '</button></header>' +
@@ -294,7 +364,7 @@
     $('#btnMe').onclick = function () { location.hash = '#/profile'; };
     $('#bMore').onclick = function (ev) {
       ev.preventDefault();
-      drawer('Menu', '<div class="col">' + nav.map(function (n) { return '<a class="btn" style="justify-content:flex-start" href="#/' + n[0] + '">' + ico(n[2]) + n[1] + '</a>'; }).join('') + '<a class="btn" style="justify-content:flex-start" href="#/profile">' + ico('user') + 'Profil saya</a><button class="btn danger" id="dOut" style="justify-content:flex-start">' + ico('out') + 'Keluar</button></div>', function (d) { $$('a', d).forEach(function (a) { a.addEventListener('click', function () { d.remove(); }); }); $('#dOut', d).onclick = logout; });
+      drawer('Menu', '<div class="col">' + nav.map(function (n) { return '<a class="btn" style="justify-content:flex-start" href="#/' + n[0] + '">' + ico(n[2]) + n[1] + '</a>'; }).join('') + '<a class="btn" style="justify-content:flex-start" href="#/profile">' + ico('user') + 'Profil saya</a><a class="btn" style="justify-content:flex-start" href="#/about">' + ico('shield') + 'Tentang, S&amp;K &amp; Privasi</a><button class="btn danger" id="dOut" style="justify-content:flex-start">' + ico('out') + 'Keluar</button></div>', function (d) { $$('a', d).forEach(function (a) { a.addEventListener('click', function () { d.remove(); }); }); $('#dOut', d).onclick = logout; });
     };
     renderOfflineBar();
   }
@@ -345,8 +415,12 @@
       S.pollTimer = setTimeout(poll, document.hidden ? 30000 : (busy ? 4000 : 9000));
     });
   }
-  document.addEventListener('visibilitychange', function () { if (!document.hidden && S.token) poll(); if (S.office) S.office.setPaused(document.hidden); });
-  var refreshViewSoft = debounce(function () { if (['dashboard', 'tasks', 'approvals', 'workflow', 'employees'].indexOf(S.view) >= 0 && !$('.modal-bg') && !$('.drawer')) route(true); }, 1200);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && S.token) poll(); if (S.office) S.office.setPaused(document.hidden || S.view !== 'office'); });
+  /** Render ulang ringan tanpa skeleton; tidak mengganggu formulir yang sedang diisi. */
+  function canSoft() { var a = document.activeElement, v = $('#view'); return S.view !== 'office' && S.view !== 'settings' && S.view !== 'profile' && !$('.modal-bg') && !$('.drawer') && !(v && a && v.contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName)); }
+  var softRefresh = debounce(function () { if (S.token && canSoft()) route(true); }, 250);
+  var refreshViewSoft = debounce(function () { if (['dashboard', 'tasks', 'approvals', 'workflow', 'employees'].indexOf(S.view) >= 0 && canSoft()) { clearViewCache(); route(true); } }, 1200);
+  function clearViewCache() { try { Object.keys(localStorage).forEach(function (k) { if (/^avo_c:\/(tasks|dashboard|approvals|workflows|employees)/.test(k)) { var e = JSON.parse(localStorage.getItem(k)); if (e) { e.t = 0; localStorage.setItem(k, JSON.stringify(e)); } } }); } catch (e) { } }
 
   function showNotifications() {
     api('GET', '/notifications', {}, { noCache: true }).then(function (list) {
@@ -363,12 +437,13 @@
     if (!VIEWS[name]) name = 'office';
     var navDef = NAV.filter(function (n) { return n[0] === name; })[0];
     if (navDef && !can(navDef[3])) name = 'profile';
-    if (S.office && (!soft || S.view !== name)) { S.office.destroy(); S.office = null; }
+    if (S.office && name !== 'office') S.office.setPaused(true); // kantor 3D dipertahankan di memori: kembali ke menu Kantor instan
     S.view = name;
     $$('[data-nav]').forEach(function (a) { a.classList.toggle('on', a.getAttribute('data-nav') === name); });
     var v = $('#view'); if (!v) return;
-    if (!soft) v.innerHTML = '<div class="col"><div class="skel" style="width:40%"></div><div class="skel"></div><div class="skel" style="width:70%"></div></div>';
-    Promise.resolve(VIEWS[name](v, h.slice(1), soft)).catch(function (e) { v.innerHTML = '<div class="notice err">' + esc(e.message) + '</div>'; });
+    var sk = setTimeout(function () { if (!soft && v.getAttribute('data-r') === rid) v.innerHTML = '<div class="col"><div class="skel" style="width:40%"></div><div class="skel"></div><div class="skel" style="width:70%"></div></div>'; }, 120);
+    var rid = String(Date.now() + Math.random()); v.setAttribute('data-r', rid);
+    Promise.resolve(VIEWS[name](v, h.slice(1), soft)).then(function () { clearTimeout(sk); }, function (e) { clearTimeout(sk); throw e; }).catch(function (e) { if (e.code === 'LEGAL_REQUIRED') { v.innerHTML = ''; return; } v.innerHTML = '<div class="notice err">' + esc(e.message) + '</div>'; });
     if (!soft) window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', function () { route(); });
@@ -377,8 +452,15 @@
   // VIEW: KANTOR 3D
   // =====================================================================
   VIEWS.office = function (v) {
+    if (S.office && S.officeRoot) {
+      v.innerHTML = ''; v.appendChild(S.officeRoot); S.office.setPaused(document.hidden);
+      S.office.setStatuses(S.statuses); renderEmpList(); renderFeed();
+      return Promise.resolve();
+    }
     return api('GET', '/office/layout').then(function (lay) {
+      if (S.view !== 'office') return;
       S.employees = lay.employees;
+      var root = document.createElement('div'); v.innerHTML = ''; v.appendChild(root); S.officeRoot = root; v = root;
       lay.employees.forEach(function (e) { if (!S.statuses[e.id]) S.statuses[e.id] = e.live; });
       var mode = store.get('office_mode', 'auto');
       v.innerHTML = '<div class="row" style="margin-bottom:12px"><div><h1 style="margin:0">Kantor Virtual</h1><div class="muted small">Status avatar mengikuti eksekusi backend secara nyata (task_runs).</div></div><div class="right row"><button class="btn sm" id="ofMode">' + ico('grid', 15) + '<span></span></button>' + (can('workflow.run') ? '<a class="btn sm primary" href="#/workflow">' + ico('plus', 15) + 'Beri instruksi</a>' : '') + '</div></div>' +
@@ -389,7 +471,7 @@
       var use3d = mode === '2d' ? false : (mode === '3d' || webglOk());
       var setModeLabel = function () { $('#ofMode span').textContent = use3d ? 'Tampilan 2D' : 'Tampilan 3D'; };
       setModeLabel();
-      $('#ofMode').onclick = function () { store.set('office_mode', use3d ? '2d' : '3d'); if (S.office) S.office.destroy(); S.office = null; route(); };
+      $('#ofMode').onclick = function () { store.set('office_mode', use3d ? '2d' : '3d'); if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; route(); };
       S.office = use3d ? new Office3D($('#stage'), lay, openEmployee) : new Office2D($('#stage'), lay, openEmployee);
       S.office.setStatuses(S.statuses);
       $$('[data-c]').forEach(function (b) { b.onclick = function () { S.office.control(b.getAttribute('data-c')); }; });
@@ -877,13 +959,16 @@
       el.innerHTML = '<div class="grid g2"><div class="card col"><h3>Identitas & header</h3><div class="row"><img class="logo" id="soLogo" style="width:88px;height:88px" src="' + esc(b.logo || DEFAULT_LOGO) + '" alt="Logo"><div class="small muted">Klik logo untuk zoom.<br>Logo dikompres otomatis ≤512px.</div></div>' +
         '<label class="f">Nama organisasi<input class="i" id="soName" value="' + esc(S.me.org.name) + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Judul header<input class="i" id="soTitle" maxlength="60" value="' + esc(b.title) + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Subjudul<input class="i" id="soSub" maxlength="80" value="' + esc(b.subtitle) + '"' + (can('org.manage') ? '' : ' disabled') + '></label>' +
         (can('org.manage') ? '<div class="row"><button class="btn" id="soUp">Ganti logo</button><button class="btn primary" id="soSave">Simpan</button></div>' : '') + '</div>' +
-        '<div class="card"><h3>Departemen</h3><div id="soDepts" class="col"></div>' + (can('department.manage') ? '<div class="row" style="margin-top:10px"><input class="i" id="sdCode" placeholder="KODE" style="max-width:100px"><input class="i grow" id="sdName" placeholder="Nama departemen"><button class="btn" id="sdAdd">Tambah</button></div>' : '') + '</div></div>';
+        '<div class="card"><h3>Departemen</h3><div id="soDepts" class="col"></div>' + (can('department.manage') ? '<div class="row" style="margin-top:10px"><input class="i" id="sdCode" placeholder="KODE" style="max-width:100px"><input class="i grow" id="sdName" placeholder="Nama departemen"><button class="btn" id="sdAdd">Tambah</button></div>' : '') + '</div>' +
+        '<div class="card col"><h3>Dokumen hukum & pelindungan data</h3><p class="small muted">Dipakai di Syarat & Ketentuan dan Pemberitahuan Privasi (organisasi = pengendali data). Pengguna diminta menyetujui dokumen saat pertama login.</p><label class="f">Email kontak pelindungan data<input class="i" id="slMail" type="email" value="' + esc(((S.me.org.legal || {}).contact_email) || '') + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Nama penyedia aplikasi<input class="i" id="slProv" maxlength="120" value="' + esc(((S.me.org.legal || {}).provider_name) || '') + '"' + (can('org.manage') ? '' : ' disabled') + '></label><div class="row">' + (can('org.manage') ? '<button class="btn primary" id="slSave">Simpan</button>' : '') + '<button class="btn" data-legal="terms">Lihat S&amp;K</button><button class="btn" data-legal="privacy">Lihat Privasi</button></div></div></div>';
       var newLogo;
       $('#soLogo').onclick = function () { zoomImage(this.src, 'Logo'); };
       if (can('org.manage')) {
         $('#soUp').onclick = function () { pickFile('image/*').then(function (f) { return readImage(f, 512, 'image/png'); }).then(function (d) { newLogo = d; $('#soLogo').src = d; }).catch(fail); };
         $('#soSave').onclick = function () { api('PUT', '/org', { name: $('#soName').value, title: $('#soTitle').value, subtitle: $('#soSub').value, logo: newLogo }).then(function (o) { S.me.org = o; store.set('me', S.me); renderShell(); route(); toast('Tersimpan.', 'ok'); }).catch(fail); };
       }
+      bindLegalLinks(el);
+      var sl = $('#slSave'); if (sl) sl.onclick = function () { api('PUT', '/settings', { legal_contact_email: $('#slMail').value.trim(), legal_provider_name: $('#slProv').value.trim() }).then(function (r) { S.me.org.legal = { contact_email: r.legal_contact_email || '', provider_name: r.legal_provider_name || '' }; store.set('me', S.me); toast('Tersimpan.', 'ok'); }).catch(fail); };
       api('GET', '/departments').then(function (d) { $('#soDepts').innerHTML = d.map(function (x) { return '<div class="row"><i class="dot" style="background:' + esc(x.color) + '"></i><b>' + esc(x.name) + '</b><span class="mono small muted">' + esc(x.code) + '</span></div>'; }).join(''); });
       var add = $('#sdAdd'); if (add) add.onclick = function () { api('POST', '/departments', { code: $('#sdCode').value, name: $('#sdName').value }).then(function () { toast('Departemen ditambahkan.', 'ok'); route(); }).catch(fail); };
     },
@@ -947,7 +1032,7 @@
     var u = S.me.user;
     v.innerHTML = '<h1>Profil saya</h1><div class="grid g2"><div class="card col"><div class="row">' + avatarHtml(u, true) + '<div class="col" style="gap:6px"><b style="font-size:16px">' + esc(u.name) + '</b><span class="muted small">' + esc(u.email) + ' · ' + esc(S.me.role) + '</span><div class="row"><button class="btn sm" id="pUp">Ganti foto</button>' + (u.photo ? '<button class="btn sm ghost" id="pRm">Hapus foto</button>' : '') + '</div><span class="small muted">Klik foto untuk zoom (pinch / scroll / ketuk dua kali).</span></div></div>' +
       '<label class="f">Nama tampilan<input class="i" id="pName" maxlength="80" value="' + esc(u.name) + '"></label><button class="btn primary" id="pSave" style="align-self:flex-start">Simpan profil</button></div>' +
-      '<div class="card col"><h3>Ubah kata sandi</h3><label class="f">Kata sandi lama<input class="i" type="password" id="pOld" autocomplete="current-password"></label><label class="f">Kata sandi baru<input class="i" type="password" id="pNew" autocomplete="new-password"><span>Minimal 8 karakter, huruf + angka. Sesi lain akan dikeluarkan.</span></label><button class="btn" id="pPw" style="align-self:flex-start">Ubah kata sandi</button><hr style="border:0;border-top:1px solid var(--border);width:100%"><button class="btn danger" id="pOut" style="align-self:flex-start">' + ico('out', 15) + 'Keluar</button></div></div>';
+      '<div class="card col"><h3>Ubah kata sandi</h3><label class="f">Kata sandi lama<input class="i" type="password" id="pOld" autocomplete="current-password"></label><label class="f">Kata sandi baru<input class="i" type="password" id="pNew" autocomplete="new-password"><span>Minimal 8 karakter, huruf + angka. Sesi lain akan dikeluarkan.</span></label><button class="btn" id="pPw" style="align-self:flex-start">Ubah kata sandi</button><hr style="border:0;border-top:1px solid var(--border);width:100%"><a class="btn" href="#/about" style="align-self:flex-start">' + ico('shield', 15) + 'Tentang aplikasi, S&amp;K &amp; Privasi</a><button class="btn danger" id="pOut" style="align-self:flex-start">' + ico('out', 15) + 'Keluar</button></div></div>';
     var av = $('.avatar.lg', v); if (av && u.photo) av.onclick = function () { zoomImage(u.photo, 'Foto profil'); };
     var saveProfile = function (patch) { return api('PUT', '/auth/profile', patch).then(function (r) { S.me.user = Object.assign(S.me.user, r); store.set('me', S.me); renderShell(); route(); toast('Profil tersimpan.', 'ok'); }).catch(fail); };
     $('#pUp').onclick = function () { pickFile('image/*').then(function (f) { return readImage(f, 480, 'image/jpeg'); }).then(function (d) { saveProfile({ photo: d }); }).catch(fail); };
@@ -957,12 +1042,44 @@
     $('#pOut').onclick = logout;
   };
 
+  // =====================================================================
+  // VIEW: TENTANG (versi, S&K, privasi, atribusi)
+  // =====================================================================
+  VIEWS.about = function (v) {
+    var a = S.me.app || {}, l = S.me.legal || {}, lic = S.me.license || {};
+    var mismatch = a.version && a.version !== VERSION;
+    v.innerHTML = '<h1>Tentang aplikasi</h1><div class="grid g2"><div class="card col"><div class="row"><img class="logo" style="width:56px;height:56px" src="' + esc(S.me.org.branding.logo || DEFAULT_LOGO) + '" alt="Logo" id="abLogo"><div><b style="font-size:16px">AI Virtual Office 3D</b><div class="muted small">Autonomous Digital Workforce · Edisi Google Apps Script</div></div></div>' +
+      '<table class="t"><tr><td>Versi aplikasi (antarmuka)</td><td><b>' + VERSION + '</b> · build ' + BUILD_DATE + '</td></tr><tr><td>Versi server (Apps Script)</td><td><b>' + esc(a.version || '—') + '</b> · skema database v' + esc(a.schema || '—') + '</td></tr><tr><td>Mode</td><td>' + (IS_GAS ? 'Web App Google Apps Script' : 'PWA (GitHub Pages)') + (navigator.serviceWorker && navigator.serviceWorker.controller ? ' · offline aktif' : '') + '</td></tr><tr><td>Lisensi</td><td>' + esc(lic.label || lic.plan || '—') + ' · ' + esc(lic.message || '') + '</td></tr><tr><td>Organisasi</td><td>' + esc(S.me.org.name) + '</td></tr></table>' +
+      (mismatch ? '<div class="notice warn">Versi antarmuka (' + VERSION + ') berbeda dengan server (' + esc(a.version) + '). Perbarui deployment Apps Script atau berkas GitHub agar sama.</div>' : '<div class="notice small">Antarmuka dan server memakai versi yang sama.</div>') +
+      (IS_GAS ? '' : '<button class="btn sm" id="abUpd" style="align-self:flex-start">' + ico('refresh', 14) + 'Periksa pembaruan</button>') + '</div>' +
+      '<div class="card col"><h3>Dokumen hukum</h3><div class="row"><button class="btn" data-legal="terms">' + ico('file', 15) + 'Syarat &amp; Ketentuan v' + LEGAL_V.terms + '</button><button class="btn" data-legal="privacy">' + ico('shield', 15) + 'Pemberitahuan Privasi v' + LEGAL_V.privacy + '</button></div>' +
+      '<div class="small muted">' + (l.accepted ? 'Anda menyetujui versi ini pada ' + fmtDate(l.accepted_at) + '.' : 'Belum disetujui.') + ' Berlaku sejak ' + esc(LEGAL_V.effective) + '. Pengendali data: ' + esc(S.me.org.name) + '. Kontak: ' + esc((S.me.org.legal || {}).contact_email || 'administrator organisasi') + '.</div>' +
+      '<h3 style="margin-top:8px">Hak subjek data (UU PDP)</h3><div class="small">Anda dapat memperbarui nama & foto di <a href="#/profile">Profil</a>, menghapus foto kapan saja, dan mengajukan akses, salinan, koreksi, atau penghapusan data kepada kontak pelindungan data organisasi.</div>' +
+      '<h3 style="margin-top:8px">Komponen pihak ketiga</h3><div class="small">three.js r128 — © three.js authors — MIT License · Font Inter — SIL Open Font License 1.1 · Berjalan di Google Apps Script, Sheets & Drive (Google Terms of Service).</div></div></div>';
+    bindLegalLinks(v);
+    $('#abLogo').onclick = function () { zoomImage(this.src, 'Logo'); };
+    var up = $('#abUpd'); if (up) up.onclick = function () { if (navigator.serviceWorker) navigator.serviceWorker.getRegistration().then(function (r) { if (r) r.update().then(function () { toast('Pemeriksaan selesai. Bila ada versi baru, aplikasi akan memuat ulang otomatis.', 'ok'); }); else toast('Service worker tidak aktif di mode ini.'); }); };
+  };
+
   // ---------------- boot ----------------
-  function bootApp() {
+  /** Prefetch data menu utama di latar belakang agar perpindahan tab instan. */
+  function prefetch() {
+    var jobs = [['/dashboard', {}], ['/employees', {}], ['/tasks', { status: store.get('task_filter', ''), q: store.get('task_q', ''), limit: 300 }], ['/approvals', { status: store.get('appr_tab', 'pending') === 'pending' ? 'pending' : '' }], ['/workflows/runs', { limit: 30 }], ['/artifacts', { type: store.get('art_type', '') }]];
+    jobs.forEach(function (j, i) {
+      setTimeout(function () {
+        if (!S.token || !S.online || cacheGet(j[0], j[1])) return;
+        send({ method: 'GET', path: '/api/v1' + j[0], body: {}, query: j[1], token: S.token }).then(function (r) { if (r && r.ok && S.token) cachePut(j[0], j[1], r.data); }).catch(function () { });
+      }, 1500 + i * 700);
+    });
+  }
+  function bootApp(fresh) {
     renderShell();
+    if (S.me && S.me.legal && !S.me.legal.accepted) { $('#view').innerHTML = ''; setTimeout(poll, 600); showLegalGate(); return; }
     if (!location.hash || location.hash === '#/') location.hash = '#/office'; else route();
-    S.seq = 0; poll(); flushOutbox();
-    api('GET', '/auth/me', {}, { noCache: true }).then(function (me) { S.me = me; store.set('me', me); var t = $('#tTitle'); if (t && t.textContent !== me.org.branding.title) { renderShell(); route(); } }).catch(function () { });
+    S.seq = 0; setTimeout(poll, fresh ? 600 : 0); flushOutbox();
+    if (S.me && S.me.legal && !S.me.legal.accepted) showLegalGate();
+    if (!fresh) api('GET', '/auth/me', {}, { noCache: true }).then(function (me) { S.me = me; store.set('me', me); if (me.legal && !me.legal.accepted) showLegalGate(); var t = $('#tTitle'); if (t && t.textContent !== me.org.branding.title) { renderShell(); route(); } }).catch(function () { });
+    prefetch();
   }
   function start() {
     var p = new URLSearchParams(location.search);
@@ -973,7 +1090,9 @@
       if (S.me) return bootApp();
     }
     if (!IS_GAS && !apiUrl()) return renderLogin(null);
-    api('GET', '/health', {}, { noCache: true }).then(renderLogin).catch(function (e) { renderLogin(null); toast(e.message, 'err'); });
+    var cachedHealth = store.get('health');
+    if (cachedHealth) renderLogin(cachedHealth); // tampil seketika, cek status server di latar belakang
+    api('GET', '/health', {}, { noCache: true }).then(function (h) { store.set('health', h); if (!S.token && (!cachedHealth || cachedHealth.needs_setup !== h.needs_setup)) renderLogin(h); }).catch(function (e) { if (!cachedHealth) renderLogin(null); toast(e.message, 'err'); });
   }
   // service worker (hanya di GitHub Pages / origin sendiri; tidak di iframe GAS)
   if (!IS_GAS && 'serviceWorker' in navigator && location.protocol === 'https:') {
