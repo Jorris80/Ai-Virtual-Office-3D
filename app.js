@@ -5,8 +5,8 @@
  */
 (function () {
   'use strict';
-  var VERSION = '1.1.0';
-  var BUILD_DATE = '2026-10-28';
+  var VERSION = '1.3.0';
+  var BUILD_DATE = '2026-10-29';
   var LEGAL_V = { terms: '2026.10', privacy: '2026.10', effective: '2026-10-28' };
   var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbyN6Dbkg8jldepFbJ9WTZqznskpyW5-mC7CVRPDIwUJfKnfqMoH_V4bgTX7uMf5w-_X/exec'; // opsional: isi URL Web App (…/exec) saat build untuk klien
   var IS_GAS = !!(window.google && google.script && google.script.run);
@@ -65,6 +65,11 @@
   function cacheGet(path, query) { var e = store.get(cacheKey(path, query)); return e && e.t && e.u === userKey() ? e : null; }
   function cachePut(path, query, data) { var s = JSON.stringify(data); if (s.length < 400000) store.set(cacheKey(path, query), { t: Date.now(), u: userKey(), d: data }); }
   function clearDataCache() { try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf('avo_c:') === 0) localStorage.removeItem(k); }); } catch (e) { } }
+  /** Struktur kantor berubah (departemen/karyawan/templat) → bangun ulang scene & buang cache tata letak. */
+  function officeChanged() {
+    if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; S.employees = [];
+    ['/office/layout', '/employees', '/departments', '/org/members', '/templates/positions'].forEach(function (p) { store.del(cacheKey(p, {})); store.del(cacheKey(p)); });
+  }
   var inflight = {};
   /** Stale-while-revalidate: tampilkan data tersimpan seketika, segarkan di latar belakang. */
   function revalidate(req, path, opts, ent) {
@@ -465,16 +470,28 @@
       var mode = store.get('office_mode', 'auto');
       v.innerHTML = '<div class="row" style="margin-bottom:12px"><div><h1 style="margin:0">Kantor Virtual</h1><div class="muted small">Status avatar mengikuti eksekusi backend secara nyata (task_runs).</div></div><div class="right row"><button class="btn sm" id="ofMode">' + ico('grid', 15) + '<span></span></button>' + (can('workflow.run') ? '<a class="btn sm primary" href="#/workflow">' + ico('plus', 15) + 'Beri instruksi</a>' : '') + '</div></div>' +
         (S.stopped ? '<div class="notice err" style="margin-bottom:12px">⛔ Emergency stop aktif — semua eksekusi AI dihentikan.</div>' : '') +
-        '<div class="office-wrap"><div class="stage" id="stage"><div class="ctrl"><button class="iconbtn" data-c="in" title="Perbesar">' + ico('zin') + '</button><button class="iconbtn" data-c="out" title="Perkecil">' + ico('zout') + '</button><button class="iconbtn" data-c="reset" title="Reset kamera">' + ico('reset') + '</button></div>' +
+        '<div class="office-wrap"><div class="stage" id="stage"><div class="ctrl"><button class="iconbtn" data-c="in" title="Perbesar">' + ico('zin') + '</button><button class="iconbtn" data-c="out" title="Perkecil">' + ico('zout') + '</button><button class="iconbtn" data-c="reset" title="Reset kamera">' + ico('reset') + '</button><button class="iconbtn" data-c="gfx" title="Kualitas grafis: ' + GFX_LABEL[store.get('gfx', 'auto')] + '">' + ico('cube') + '</button></div>' +
         '<div class="legend">' + ['working', 'queued', 'waiting', 'error', 'idle'].map(function (s) { return '<span class="row" style="gap:5px"><i class="dot" style="background:#' + STATE_COLOR[s].toString(16).padStart(6, '0') + '"></i>' + LABEL[s] + '</span>'; }).join('') + '</div></div>' +
         '<div class="col"><div class="card"><h3>Karyawan AI</h3><div id="empList"></div></div><div class="card"><h3>Aktivitas</h3><div class="feed" id="feed"></div></div></div></div>';
       var use3d = mode === '2d' ? false : (mode === '3d' || webglOk());
       var setModeLabel = function () { $('#ofMode span').textContent = use3d ? 'Tampilan 2D' : 'Tampilan 3D'; };
       setModeLabel();
       $('#ofMode').onclick = function () { store.set('office_mode', use3d ? '2d' : '3d'); if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; route(); };
-      S.office = use3d ? new Office3D($('#stage'), lay, openEmployee) : new Office2D($('#stage'), lay, openEmployee);
+      S.office = use3d ? new Office3D($('#stage'), lay, openEmployee, function (q) {
+        S.gfxAuto = q === 'high' ? 'mid' : 'low';
+        toast('Grafis disesuaikan ke ' + GFX_LABEL[S.gfxAuto] + ' agar tetap lancar di perangkat ini.');
+        if (S.view !== 'office') { if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; return; }
+        if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; route();
+      }) : new Office2D($('#stage'), lay, openEmployee);
       S.office.setStatuses(S.statuses);
-      $$('[data-c]').forEach(function (b) { b.onclick = function () { S.office.control(b.getAttribute('data-c')); }; });
+      $$('[data-c]').forEach(function (b) { b.onclick = function () {
+        if (b.getAttribute('data-c') === 'gfx') {
+          var order = ['auto', 'high', 'mid', 'low'], cur = store.get('gfx', 'auto'), nx = order[(order.indexOf(cur) + 1) % order.length];
+          store.set('gfx', nx); toast('Kualitas grafis: ' + GFX_LABEL[nx] + (nx === 'auto' ? ' (' + GFX_LABEL[gfxLevel()] + ')' : ''));
+          if (S.office) S.office.destroy(); S.office = null; S.officeRoot = null; route(); return;
+        }
+        S.office.control(b.getAttribute('data-c'));
+      }; });
       renderEmpList(); renderFeed();
     });
   };
@@ -490,73 +507,405 @@
     f.innerHTML = S.events.length ? S.events.slice(0, 40).map(function (e) { return '<div><b>' + esc(e.message) + '</b><div class="muted small">' + esc(e.type) + ' · ' + ago(e.created_at) + '</div></div>'; }).join('') : '<div class="muted small" style="border:0">Belum ada aktivitas.</div>';
   }
 
-  /** Kantor 3D (Three.js r128) — kamera orbit buatan sendiri, render on-demand, jeda saat tab tersembunyi. */
-  function Office3D(stage, lay, onPick) {
-    var self = this, T = window.THREE, W = stage.clientWidth, H = stage.clientHeight;
-    var renderer = new T.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5)); renderer.setSize(W, H);
+  /**
+   * Kantor 3D v2 (Three.js r128, MIT).
+   * - Material PBR, bayangan lembut, tone mapping ACES, tekstur prosedural (tanpa unduhan aset).
+   * - Avatar karakter: wajah, rambut/hijab, lengan beranimasi (mengetik, angkat tangan, lesu saat error).
+   * - Siang/malam mengikuti tema, 3 tingkat kualitas grafis (Tinggi / Standar / Hemat).
+   * - Status visual tetap 100% berasal dari backend (task_runs) — tidak ada animasi "kerja" palsu.
+   */
+  var GFX_LABEL = { auto: 'Otomatis', high: 'Tinggi', mid: 'Standar', low: 'Hemat' };
+  function gfxLevel() {
+    var g = store.get('gfx', 'auto');
+    if (g !== 'auto') return g;
+    if (S.gfxAuto) return S.gfxAuto; // diturunkan otomatis karena perangkat terdeteksi lambat
+    var coarse = window.matchMedia && matchMedia('(pointer: coarse)').matches, mem = navigator.deviceMemory || 4;
+    if (mem <= 2) return 'low';
+    return coarse ? 'mid' : 'high';
+  }
+  function Office3D(stage, lay, onPick, onSlow) {
+    var self = this, T = window.THREE, W = stage.clientWidth, H = stage.clientHeight, Q = gfxLevel(), HQ = Q === 'high', LOW = Q === 'low';
+    var reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var renderer = new T.WebGLRenderer({ antialias: !LOW, alpha: true, powerPreference: HQ ? 'high-performance' : 'low-power' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, HQ ? 2 : LOW ? 1 : 1.5)); renderer.setSize(W, H);
+    renderer.outputEncoding = T.sRGBEncoding; renderer.toneMapping = T.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = !LOW; renderer.shadowMap.type = T.PCFSoftShadowMap;
     stage.insertBefore(renderer.domElement, stage.firstChild);
-    var scene = new T.Scene(), camera = new T.PerspectiveCamera(45, W / H, 0.5, 300);
-    scene.add(new T.HemisphereLight(0xffffff, 0x8899aa, 0.95));
-    var dl = new T.DirectionalLight(0xffffff, 0.55); dl.position.set(12, 30, 18); scene.add(dl);
-    var dark = function () { return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim().indexOf('#0') === 0; };
-    var floorMat = new T.MeshLambertMaterial({ color: dark() ? 0x16223a : 0xe9eef6 });
-    var floor = new T.Mesh(new T.PlaneGeometry(160, 120), floorMat); floor.rotation.x = -Math.PI / 2; scene.add(floor);
-    var grid = new T.GridHelper(48, 24, 0x9aa8bf, 0x9aa8bf); grid.material.opacity = 0.18; grid.material.transparent = true; scene.add(grid);
-    var labels = [], avatars = {}, pickables = [];
+    var scene = new T.Scene(), camera = new T.PerspectiveCamera(42, W / H, 0.5, 320);
+    var maxAniso = renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 1;
+    var disposables = [];
     function hex(c) { return parseInt(String(c || '#64748b').replace('#', ''), 16); }
+    function M(color, o) {
+      o = o || {};
+      var m = LOW ? new T.MeshLambertMaterial({ color: color }) : new T.MeshStandardMaterial({ color: color, roughness: o.r === undefined ? 0.7 : o.r, metalness: o.m || 0 });
+      if (o.emissive !== undefined && m.emissive) m.emissive.setHex(o.emissive);
+      ['transparent', 'opacity', 'emissiveIntensity', 'emissiveMap', 'map', 'side', 'flatShading', 'depthWrite'].forEach(function (k) { if (o[k] !== undefined) m[k] = o[k]; });
+      return m;
+    }
+    function tex(w, h, draw, rep) {
+      var c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+      var t = new T.CanvasTexture(c); t.encoding = T.sRGBEncoding; t.anisotropy = Math.min(8, maxAniso);
+      if (rep) { t.wrapS = t.wrapT = T.RepeatWrapping; t.repeat.set(rep[0], rep[1]); }
+      disposables.push(t); return t;
+    }
+    function noise(g, w, h, n, a, light) { for (var i = 0; i < n; i++) { g.fillStyle = (light ? 'rgba(255,255,255,' : 'rgba(0,0,0,') + (Math.random() * a) + ')'; g.fillRect(Math.random() * w, Math.random() * h, 1 + Math.random() * 2, 1 + Math.random() * 2); } }
+    /** Kotak dengan sudut membulat (denah), pusat di (0, h/2, 0). */
+    function rbox(w, h, d, r) {
+      r = Math.min(r, w / 2 - 0.001, d / 2 - 0.001);
+      var s = new T.Shape(), x = -w / 2, y = -d / 2;
+      s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r); s.lineTo(x + w, y + d - r); s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
+      s.lineTo(x + r, y + d); s.quadraticCurveTo(x, y + d, x, y + d - r); s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
+      var g = new T.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: 6 }); g.rotateX(-Math.PI / 2); return g;
+    }
+    function add(parent, geo, mat, x, y, z, cast, recv) { var m = new T.Mesh(geo, mat); m.position.set(x || 0, y || 0, z || 0); m.castShadow = !!cast && !LOW; m.receiveShadow = !!recv && !LOW; parent.add(m); return m; }
+    function lerpHex(a, b, k) { var ca = new T.Color(a), cb = new T.Color(b); return ca.lerp(cb, k).getHex(); }
+
+    // ---------- tekstur ----------
+    var floorTex = tex(512, 512, function (g, w, h) {
+      var tones = ['#cfb08b', '#d6b893', '#c8a782', '#dbbf9c', '#cbab86'];
+      for (var row = 0; row < 8; row++) {
+        var off = (row % 2) * 128;
+        for (var c = -1; c < 3; c++) {
+          var x = c * 256 + off, y = row * 64; g.fillStyle = tones[(row * 3 + c + 5) % tones.length]; g.fillRect(x, y, 256, 64);
+          g.strokeStyle = 'rgba(120,85,50,.10)'; g.lineWidth = 1; for (var k = 0; k < 7; k++) { g.beginPath(); g.moveTo(x, y + 6 + k * 8 + Math.random() * 3); g.bezierCurveTo(x + 80, y + 4 + k * 8, x + 170, y + 10 + k * 8, x + 256, y + 6 + k * 8); g.stroke(); }
+          g.fillStyle = 'rgba(70,45,25,.35)'; g.fillRect(x, y, 2, 64);
+        }
+        g.fillStyle = 'rgba(70,45,25,.30)'; g.fillRect(0, row * 64, w, 2);
+      }
+      noise(g, w, h, 1800, 0.05);
+    }, [34, 24]);
+    var carpetTex = tex(256, 256, function (g, w, h) { g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, h); noise(g, w, h, 4000, 0.07); g.strokeStyle = 'rgba(0,0,0,.035)'; for (var y = 0; y < h; y += 4) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); } }, [3, 3]);
+    function skyTex(night) {
+      return tex(256, 128, function (g, w, h) {
+        var gr = g.createLinearGradient(0, 0, 0, h);
+        if (night) { gr.addColorStop(0, '#0b1633'); gr.addColorStop(1, '#22365f'); } else { gr.addColorStop(0, '#9fc8f5'); gr.addColorStop(1, '#e9f3ff'); }
+        g.fillStyle = gr; g.fillRect(0, 0, w, h);
+        if (night) { for (var i = 0; i < 26; i++) { var bx = Math.random() * w, bw = 10 + Math.random() * 22, bh = 20 + Math.random() * 60; g.fillStyle = '#101b36'; g.fillRect(bx, h - bh, bw, bh); for (var k = 0; k < 6; k++) { g.fillStyle = 'rgba(255,214,140,' + (0.4 + Math.random() * 0.6) + ')'; g.fillRect(bx + 2 + Math.random() * (bw - 4), h - bh + 4 + Math.random() * (bh - 8), 2, 2); } } }
+        else { g.fillStyle = 'rgba(255,255,255,.75)'; [[50, 40, 30], [70, 34, 22], [180, 30, 26], [200, 38, 18]].forEach(function (c) { g.beginPath(); g.arc(c[0], c[1], c[2], 0, Math.PI * 2); g.fill(); }); g.fillStyle = 'rgba(120,150,190,.35)'; for (var j = 0; j < 14; j++) { var x = j * 19, hh = 14 + Math.random() * 26; g.fillRect(x, h - hh, 16, hh); } }
+      });
+    }
+    var skyDay = skyTex(false), skyNight = skyTex(true);
+    function screenTex(col) {
+      return tex(256, 160, function (g, w, h) {
+        g.fillStyle = '#0d1526'; g.fillRect(0, 0, w, h); g.fillStyle = col; g.fillRect(0, 0, w, 16); g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(0, 16, 54, h);
+        for (var i = 0; i < 9; i++) { g.fillStyle = i % 3 === 0 ? col : 'rgba(210,225,255,' + (0.35 + Math.random() * 0.4) + ')'; g.fillRect(64 + (i % 2) * 12, 28 + i * 13, 60 + Math.random() * 110, 5); }
+        g.fillStyle = col; for (var b = 0; b < 4; b++) g.fillRect(8, 28 + b * 18, 38, 9);
+      });
+    }
+    function glowTex() {
+      return tex(128, 128, function (g, w, h) { var gr = g.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, w, h); });
+    }
+    var glowMap = glowTex();
+    var shadowBlob = tex(128, 128, function (g) { var gr = g.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(0,0,0,.35)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); });
+    function bubbleTex(kind) {
+      var col = { working: '#0e9f6e', waiting: '#c27803', queued: '#1f5eff', error: '#d92d20' }[kind];
+      return tex(128, 128, function (g) {
+        g.fillStyle = '#ffffff'; g.strokeStyle = col; g.lineWidth = 7;
+        g.beginPath(); g.moveTo(24, 14); g.lineTo(104, 14); g.quadraticCurveTo(118, 14, 118, 28); g.lineTo(118, 78); g.quadraticCurveTo(118, 92, 104, 92); g.lineTo(58, 92); g.lineTo(36, 114); g.lineTo(40, 92); g.lineTo(24, 92); g.quadraticCurveTo(10, 92, 10, 78); g.lineTo(10, 28); g.quadraticCurveTo(10, 14, 24, 14); g.closePath(); g.fill(); g.stroke();
+        g.fillStyle = col; g.strokeStyle = col; g.lineCap = 'round';
+        if (kind === 'waiting') { g.fillRect(58, 28, 12, 36); g.beginPath(); g.arc(64, 76, 7, 0, 7); g.fill(); }
+        else if (kind === 'queued') { [40, 64, 88].forEach(function (x) { g.beginPath(); g.arc(x, 53, 8, 0, 7); g.fill(); }); }
+        else if (kind === 'error') { g.lineWidth = 12; g.beginPath(); g.moveTo(44, 33); g.lineTo(84, 73); g.moveTo(84, 33); g.lineTo(44, 73); g.stroke(); }
+        else { g.lineWidth = 9; g.beginPath(); g.moveTo(46, 36); g.lineTo(30, 53); g.lineTo(46, 70); g.moveTo(82, 36); g.lineTo(98, 53); g.lineTo(82, 70); g.moveTo(70, 32); g.lineTo(58, 74); g.stroke(); }
+      });
+    }
+    var bubbles = { working: bubbleTex('working'), waiting: bubbleTex('waiting'), queued: bubbleTex('queued'), error: bubbleTex('error') };
+
+    // ---------- cahaya ----------
+    var hemi = new T.HemisphereLight(0xffffff, 0xb7c3d6, 0.55); scene.add(hemi);
+    var sun = new T.DirectionalLight(0xfff1e0, 1.0); sun.position.set(18, 19, 12); scene.add(sun); scene.add(sun.target);
+    if (!LOW) { sun.castShadow = true; var sm = HQ ? 2048 : 1024; sun.shadow.mapSize.set(sm, sm); var sc = sun.shadow.camera; sc.left = -26; sc.right = 26; sc.top = 20; sc.bottom = -20; sc.near = 1; sc.far = 80; sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03; sun.shadow.radius = 3; }
+    var fill = new T.DirectionalLight(0xcfe0ff, 0.25); fill.position.set(-18, 14, -10); scene.add(fill);
+    scene.fog = new T.Fog(0xeef2f9, 60, 140);
+    var roomLights = [];
+
+    // ---------- lantai & dinding ----------
+    var floorMat = M(0xffffff, { r: 0.55, map: floorTex });
+    var floor = add(scene, new T.PlaneGeometry(160, 120), floorMat, 0, 0, 0, false, true); floor.rotation.x = -Math.PI / 2;
+    var wallMat = M(0xf3f5f8, { r: 0.9 }), frameMat = M(0xaeb8c6, { r: 0.35, m: 0.6 });
+    var xs = lay.rooms.map(function (r) { return [r.x - r.w / 2, r.x + r.w / 2]; }), zs = lay.rooms.map(function (r) { return r.z - r.d / 2; });
+    var minX = Math.min.apply(null, xs.map(function (a) { return a[0]; })) - 1.5, maxX = Math.max.apply(null, xs.map(function (a) { return a[1]; })) + 1.5, backZ = Math.min.apply(null, zs) - 0.75;
+    var wallW = maxX - minX, wallCx = (minX + maxX) / 2;
+    // batas kantor (bertambah bila ada departemen baru) → kamera, bayangan & area geser mengikuti
+    var maxZ = Math.max.apply(null, lay.rooms.map(function (r) { return r.z + r.d / 2; })) + 1, spanX = maxX - minX, spanZ = maxZ - backZ, CX = wallCx, CZ = (backZ + maxZ) / 2;
+    sun.target.position.set(CX, 0, CZ); sun.position.set(CX + 18, 19, CZ + 12);
+    if (!LOW) { var sh = Math.max(spanX, spanZ) * 0.62 + 4; sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh; sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh; sun.shadow.camera.far = 120; sun.shadow.camera.updateProjectionMatrix(); }
+    if (spanZ > 24) { scene.fog.near = 60 + (spanZ - 22) * 1.6; scene.fog.far = scene.fog.near + 90; }
+    add(scene, new T.BoxGeometry(wallW, 2.9, 0.3), wallMat, wallCx, 1.45, backZ, true, true);
+    var paneMat = M(0xffffff, { r: 0.2, emissive: 0xffffff, emissiveMap: skyDay, emissiveIntensity: 0.85, map: skyDay });
+    var nWin = Math.max(3, Math.floor(wallW / 4.6)), winW = wallW / nWin - 0.9;
+    for (var wi = 0; wi < nWin; wi++) {
+      var wx = minX + (wi + 0.5) * (wallW / nWin);
+      add(scene, new T.PlaneGeometry(winW, 1.45), paneMat, wx, 1.7, backZ + 0.16);
+      add(scene, new T.BoxGeometry(winW + 0.14, 0.08, 0.1), frameMat, wx, 0.98, backZ + 0.18); add(scene, new T.BoxGeometry(winW + 0.14, 0.08, 0.1), frameMat, wx, 2.42, backZ + 0.18);
+      add(scene, new T.BoxGeometry(0.06, 1.45, 0.08), frameMat, wx, 1.7, backZ + 0.18);
+    }
+    // ---------- ruangan ----------
+    var labels = [], avatars = {}, pickables = [];
+    var glassMat = M(0xdcecff, { r: 0.08, m: 0.1, transparent: true, opacity: 0.2, depthWrite: false, side: T.DoubleSide });
     lay.rooms.forEach(function (r) {
-      var tile = new T.Mesh(new T.BoxGeometry(r.w, 0.06, r.d), new T.MeshLambertMaterial({ color: hex(r.color), transparent: true, opacity: 0.16 })); tile.position.set(r.x, 0.03, r.z); scene.add(tile);
-      var edges = new T.LineSegments(new T.EdgesGeometry(new T.BoxGeometry(r.w, 1.1, r.d)), new T.LineBasicMaterial({ color: hex(r.color), transparent: true, opacity: 0.7 })); edges.position.set(r.x, 0.55, r.z); scene.add(edges);
-      var wall = new T.MeshLambertMaterial({ color: hex(r.color), transparent: true, opacity: 0.22 });
-      [[0, -r.d / 2, r.w, 0.12], [-r.w / 2, 0, 0.12, r.d], [r.w / 2, 0, 0.12, r.d]].forEach(function (w) { var m = new T.Mesh(new T.BoxGeometry(w[2], 1.1, w[3]), wall); m.position.set(r.x + w[0], 0.55, r.z + w[1]); scene.add(m); });
+      var col = hex(r.color);
+      var carpet = add(scene, rbox(r.w - 0.2, 0.04, r.d - 0.2, 0.35), M(lerpHex(col, 0xdfe5ee, 0.6), { r: 0.95, map: carpetTex }), r.x, 0.0, r.z, false, true);
+      carpet.position.y = 0.001;
+      var hgt = 1.25;
+      [[0, -r.d / 2, r.w, true], [-r.w / 2, 0, r.d, false], [r.w / 2, 0, r.d, false]].forEach(function (s) {
+        var len = s[2], horiz = s[3], cx = r.x + s[0], cz = r.z + s[1];
+        var gl = add(scene, new T.BoxGeometry(horiz ? len : 0.04, hgt, horiz ? 0.04 : len), glassMat, cx, hgt / 2 + 0.04, cz); gl.renderOrder = 2;
+        add(scene, new T.BoxGeometry(horiz ? len : 0.08, 0.07, horiz ? 0.08 : len), M(col, { r: 0.4, emissive: col, emissiveIntensity: 0.15 }), cx, hgt + 0.06, cz, true);
+        add(scene, new T.BoxGeometry(horiz ? len : 0.07, 0.06, horiz ? 0.07 : len), frameMat, cx, 0.03, cz);
+        var posts = Math.max(1, Math.round(len / 2.5));
+        for (var pi = 0; pi <= posts; pi++) { var t = -len / 2 + pi * len / posts; add(scene, new T.BoxGeometry(0.06, hgt, 0.06), frameMat, horiz ? cx + t : cx, hgt / 2 + 0.04, horiz ? cz : cz + t, true); }
+      });
       var el = document.createElement('div'); el.className = 'room-lbl'; el.textContent = r.name; stage.appendChild(el);
-      labels.push({ el: el, pos: new T.Vector3(r.x, 0.1, r.z + r.d / 2 - 0.7) });
+      labels.push({ el: el, pos: new T.Vector3(r.x, 0.1, r.z + r.d / 2 - 0.55) });
+      if (HQ) { var pl = new T.PointLight(0xffd9a8, 0, 9, 2); pl.position.set(r.x, 2.6, r.z); scene.add(pl); roomLights.push(pl); }
+      if (r.type === 'office') {
+        bookshelf(r.x + r.w / 2 - 1.3, r.z - r.d / 2 + 0.38);
+        plant(r.x - r.w / 2 + 0.6, r.z - r.d / 2 + 0.6, 1);
+      }
     });
-    var deskMat = new T.MeshLambertMaterial({ color: 0x8b6b4a }), legMat = new T.MeshLambertMaterial({ color: 0x334155 });
+
+    // ---------- perabot ----------
+    var woodMat = M(0xc79a6b, { r: 0.55 }), deskWhite = M(0xf4f5f7, { r: 0.45 }), metalDark = M(0x2b3442, { r: 0.4, m: 0.5 }), fabricDark = M(0x323c4e, { r: 0.85 });
+    function plant(x, z, s) {
+      var g = new T.Group(); g.position.set(x, 0, z); g.scale.setScalar(s || 1); scene.add(g);
+      add(g, new T.CylinderGeometry(0.24, 0.18, 0.42, 16), M(0xf2efe9, { r: 0.6 }), 0, 0.21, 0, true, true);
+      add(g, new T.CylinderGeometry(0.22, 0.22, 0.02, 16), M(0x4a3727), 0, 0.42, 0);
+      var leaf = M(0x3f8f4e, { r: 0.8, flatShading: true }), leaf2 = M(0x5aa862, { r: 0.8, flatShading: true });
+      var a = add(g, new T.IcosahedronGeometry(0.42, 0), leaf, 0, 0.9, 0, true); a.scale.set(1, 1.35, 1);
+      var b = add(g, new T.IcosahedronGeometry(0.28, 0), leaf2, 0.2, 1.35, 0.05, true); b.rotation.set(0.4, 0.3, 0);
+      add(g, new T.IcosahedronGeometry(0.24, 0), leaf2, -0.18, 1.2, -0.1, true);
+    }
+    function bookshelf(x, z) {
+      var g = new T.Group(); g.position.set(x, 0, z); scene.add(g);
+      add(g, new T.BoxGeometry(1.8, 1.15, 0.36), woodMat, 0, 0.575, 0, true, true);
+      add(g, new T.BoxGeometry(1.7, 0.98, 0.3), M(0x6f5236, { r: 0.8 }), 0, 0.6, 0.04);
+      [0.42, 0.8].forEach(function (y) { add(g, new T.BoxGeometry(1.7, 0.04, 0.3), woodMat, 0, y, 0.04); });
+      var books = new T.InstancedMesh(new T.BoxGeometry(0.07, 0.26, 0.2), M(0xffffff, { r: 0.7 }), 30), mtx = new T.Matrix4(), q = new T.Quaternion(), pal = [0x2f6fed, 0xd97706, 0x0e9f6e, 0xdb2777, 0x7c3aed, 0xe5e7eb, 0x334155, 0x0891b2];
+      var n = 0;
+      [0.11, 0.44, 0.82].forEach(function (y) {
+        var bx = -0.78;
+        while (bx < 0.72 && n < 30) { var hs = 0.75 + Math.random() * 0.35; q.setFromAxisAngle(new T.Vector3(0, 0, 1), Math.random() < 0.12 ? 0.25 : 0); mtx.compose(new T.Vector3(bx, y + 0.13 * hs, 0.05), q, new T.Vector3(1, hs, 1)); books.setMatrixAt(n, mtx); books.setColorAt(n, new T.Color(pal[n % pal.length])); bx += 0.075 + (Math.random() < 0.15 ? 0.12 : 0); n++; }
+      });
+      books.count = n; books.castShadow = !LOW; g.add(books);
+    }
+    function officeChair(parent, x, z, rotY) {
+      var g = new T.Group(); g.position.set(x, 0, z); g.rotation.y = rotY || 0; parent.add(g);
+      add(g, new T.CylinderGeometry(0.035, 0.035, 0.36, 8), metalDark, 0, 0.26, 0);
+      for (var i = 0; i < 5; i++) { var leg = add(g, new T.BoxGeometry(0.05, 0.04, 0.3), metalDark, 0, 0.06, 0); leg.rotation.y = i * Math.PI * 2 / 5; leg.translateZ(0.15); }
+      add(g, rbox(0.52, 0.09, 0.5, 0.1), fabricDark, 0, 0.44, 0, true, true);
+      add(g, rbox(0.5, 0.56, 0.08, 0.06), fabricDark, 0, 0.56, -0.25, true);
+      return g;
+    }
+    function blob(x, z, s) { var m = new T.Mesh(new T.PlaneGeometry(s, s), new T.MeshBasicMaterial({ map: shadowBlob, transparent: true, depthWrite: false })); m.rotation.x = -Math.PI / 2; m.position.set(x, 0.012, z); scene.add(m); }
+
+    // ---------- avatar ----------
+    var SKINS = [0xc68e62, 0xd9a47a, 0xb97a52, 0xe0b48c, 0xa86e45];
+    var STYLE = { office_manager: { hair: 'short', hc: 0x1d1a17, skin: 0 }, admin_assistant: { hair: 'hijab', hc: 0x1f6f5c, skin: 3 }, researcher: { hair: 'curly', hc: 0x231b14, skin: 2, glasses: true },
+      data_analyst: { hair: 'long', hc: 0x3a2618, skin: 1 }, report_writer: { hair: 'ponytail', hc: 0x26180f, skin: 3 }, quality_analyst: { hair: 'short', hc: 0x141210, skin: 4, glasses: true } };
+    function styleFor(e) {
+      if (STYLE[e.code]) return STYLE[e.code];
+      var h = 0; for (var i = 0; i < e.code.length; i++) h = (h * 31 + e.code.charCodeAt(i)) >>> 0;
+      return { hair: ['short', 'long', 'curly', 'ponytail', 'hijab'][h % 5], hc: [0x1d1a17, 0x3a2618, 0x231b14][h % 3], skin: h % SKINS.length, glasses: h % 4 === 0 };
+    }
+    function arm(parent, side, shirt, skin) {
+      var sh = new T.Group(); sh.position.set(0.25 * side, 1.0, 0); parent.add(sh);
+      add(sh, new T.SphereGeometry(0.075, 12, 10), shirt, 0, 0, 0, true);
+      add(sh, new T.CylinderGeometry(0.065, 0.06, 0.3, 10), shirt, 0, -0.15, 0, true);
+      var el = new T.Group(); el.position.set(0, -0.3, 0); sh.add(el);
+      var fa = add(el, new T.CylinderGeometry(0.055, 0.048, 0.28, 10), shirt, 0, 0, 0.14, true); fa.rotation.x = Math.PI / 2;
+      add(el, new T.SphereGeometry(0.056, 12, 10), skin, 0, 0, 0.3, true);
+      return { sh: sh, el: el, side: side };
+    }
+    function makeAvatar(emp, parent) {
+      var st = styleFor(emp), shirt = M(hex(emp.avatar_color), { r: 0.75 }), skin = M(SKINS[st.skin] || SKINS[0], { r: 0.6 }), pants = M(0x2a3140, { r: 0.85 }), hairM = M(st.hc, { r: 0.65, side: T.DoubleSide });
+      var g = new T.Group(); parent.add(g);
+      // kaki (sebagian tertutup meja)
+      [-1, 1].forEach(function (s) {
+        var th = add(g, new T.CylinderGeometry(0.085, 0.08, 0.42, 10), pants, 0.11 * s, 0.52, 0.17, true); th.rotation.x = Math.PI / 2;
+        add(g, new T.CylinderGeometry(0.07, 0.065, 0.46, 10), pants, 0.11 * s, 0.27, 0.36, true);
+        add(g, rbox(0.12, 0.08, 0.22, 0.05), M(0x1c1f26, { r: 0.5 }), 0.11 * s, 0, 0.42, true);
+      });
+      var hips = add(g, rbox(0.46, 0.16, 0.34, 0.12), pants, 0, 0.47, 0, true);
+      var torsoG = new T.Group(); torsoG.position.y = 0.55; g.add(torsoG);
+      var prof = [[0, 0], [0.2, 0], [0.235, 0.08], [0.24, 0.3], [0.22, 0.42], [0.15, 0.5], [0.06, 0.53], [0, 0.53]].map(function (p) { return new T.Vector2(p[0], p[1]); });
+      var torso = add(torsoG, new T.LatheGeometry(prof, 20), shirt, 0, 0, 0, true); torso.scale.z = 0.78;
+      add(torsoG, new T.TorusGeometry(0.075, 0.022, 8, 18), M(0xffffff, { r: 0.6 }), 0, 0.5, 0).rotation.x = Math.PI / 2;
+      var headG = new T.Group(); headG.position.set(0, 1.27, 0); g.add(headG);
+      add(g, new T.CylinderGeometry(0.055, 0.06, 0.12, 10), skin, 0, 1.11, 0);
+      var head = add(headG, new T.SphereGeometry(0.19, 24, 18), skin, 0, 0, 0, true); head.scale.set(1, 1.06, 0.98);
+      var eyeM = M(0x1a1b1f, { r: 0.3 }), eyes = [];
+      [-1, 1].forEach(function (s) { var e = add(headG, new T.SphereGeometry(0.022, 10, 8), eyeM, 0.068 * s, 0.015, 0.172); eyes.push(e); });
+      add(headG, new T.TorusGeometry(0.035, 0.008, 6, 12, Math.PI), M(0x7a3b2e), 0, -0.07, 0.172).rotation.z = Math.PI;
+      if (st.glasses) { var gm = M(0x111318, { r: 0.3, m: 0.4 }); [-1, 1].forEach(function (s) { add(headG, new T.TorusGeometry(0.046, 0.008, 6, 20), gm, 0.068 * s, 0.015, 0.19); }); add(headG, new T.BoxGeometry(0.04, 0.008, 0.008), gm, 0, 0.022, 0.19); }
+      var cap = new T.SphereGeometry(0.2, 24, 14, 0, Math.PI * 2, 0, Math.PI * 0.52);
+      if (st.hair === 'hijab') {
+        var hj = add(headG, new T.SphereGeometry(0.215, 28, 18, Math.PI / 2 + 0.78, Math.PI * 2 - 1.56, 0, Math.PI * 0.8), hairM, 0, 0.01, -0.005, true); hj.scale.set(1, 1.08, 1);
+        add(g, new T.CylinderGeometry(0.17, 0.3, 0.3, 24, 1, true), hairM, 0, 1.05, 0, true);
+      } else {
+        var c = add(headG, cap, hairM, 0, 0.035, -0.012, true); c.scale.set(1.03, 1.0, 1.04);
+        if (st.hair === 'long') { var lb = add(headG, new T.SphereGeometry(0.2, 18, 14), hairM, 0, -0.12, -0.07, true); lb.scale.set(1.08, 1.35, 0.7); }
+        if (st.hair === 'ponytail') { add(headG, new T.SphereGeometry(0.07, 12, 10), hairM, 0, 0.06, -0.2, true); var pt = add(headG, new T.SphereGeometry(0.07, 12, 10), hairM, 0, -0.1, -0.24, true); pt.scale.set(0.9, 2.1, 0.9); }
+        if (st.hair === 'curly') { for (var k = 0; k < 9; k++) { var a = k / 9 * Math.PI * 2; add(headG, new T.SphereGeometry(0.06, 10, 8), hairM, Math.cos(a) * 0.15, 0.12 + Math.sin(k) * 0.02, Math.sin(a) * 0.14 - 0.02, true); } }
+      }
+      var L = arm(g, -1, shirt, skin), R = arm(g, 1, shirt, skin);
+      [torso, head, hips].forEach(function (m) { m.userData.empId = emp.id; pickables.push(m); });
+      return { g: g, torsoG: torsoG, headG: headG, eyes: eyes, L: L, R: R, shirt: shirt, skinM: skin, pose: { sh: -0.7, el: 0.55, rsh: -0.7, rel: 0.55, rz: 0, hx: 0.05, hy: 0 }, phase: Math.random() * 10, blinkAt: 0 };
+    }
+
+    // ---------- meja kerja & avatar ----------
     lay.objects.forEach(function (o) {
-      if (o.type === 'meeting_table') { var tb = new T.Mesh(new T.CylinderGeometry(2.2, 2.2, 0.12, 32), deskMat); tb.position.set(o.x, 0.78, o.z); scene.add(tb); var lg = new T.Mesh(new T.CylinderGeometry(0.2, 0.3, 0.75, 12), legMat); lg.position.set(o.x, 0.38, o.z); scene.add(lg); return; }
-      var g = new T.Group(); g.position.set(o.x, 0, o.z); g.rotation.y = o.rot || 0;
-      var top = new T.Mesh(new T.BoxGeometry(2.2, 0.08, 1.1), deskMat); top.position.y = 0.78; g.add(top);
-      [[-1, -0.45], [1, -0.45], [-1, 0.45], [1, 0.45]].forEach(function (p) { var l = new T.Mesh(new T.BoxGeometry(0.08, 0.76, 0.08), legMat); l.position.set(p[0], 0.38, p[1]); g.add(l); });
-      var scrMat = new T.MeshLambertMaterial({ color: 0x1e293b, emissive: 0x000000 });
-      var scr = new T.Mesh(new T.BoxGeometry(0.9, 0.55, 0.05), scrMat); scr.position.set(0, 1.12, -0.35); g.add(scr);
-      scene.add(g);
+      if (o.type === 'meeting_table') {
+        var mg = new T.Group(); mg.position.set(o.x, 0, o.z); scene.add(mg);
+        add(mg, new T.CylinderGeometry(2.1, 2.1, 0.07, 48), woodMat, 0, 0.76, 0, true, true);
+        add(mg, new T.CylinderGeometry(0.12, 0.45, 0.72, 16), metalDark, 0, 0.36, 0, true);
+        for (var i = 0; i < 6; i++) { var a = i / 6 * Math.PI * 2 + Math.PI / 6; officeChair(mg, Math.sin(a) * 2.65, Math.cos(a) * 2.65, a + Math.PI); }
+        var room = lay.rooms.filter(function (r) { return r.id === o.room_id; })[0];
+        if (room) {
+          var tvz = room.z - room.d / 2 + 0.45;
+          add(scene, rbox(2.6, 0.5, 0.45, 0.08), woodMat, room.x, 0, tvz, true, true);
+          add(scene, new T.BoxGeometry(0.08, 0.5, 0.08), metalDark, room.x, 0.75, tvz);
+          add(scene, new T.BoxGeometry(2.3, 1.32, 0.06), M(0x111827, { r: 0.3, m: 0.3 }), room.x, 1.68, tvz, true);
+          var tvScreen = tex(320, 180, function (g2, w, h) {
+            g2.fillStyle = '#0f1b33'; g2.fillRect(0, 0, w, h); g2.fillStyle = '#e7ecf6'; g2.font = 'bold 16px sans-serif'; g2.fillText('Rapat Mingguan · Progres Tim AI', 14, 26);
+            var vals = [42, 58, 51, 73, 66, 88]; vals.forEach(function (v, j) { g2.fillStyle = j === vals.length - 1 ? '#5be0a8' : '#4d7cff'; g2.fillRect(24 + j * 46, 160 - v * 1.3, 30, v * 1.3); });
+          });
+          add(scene, new T.PlaneGeometry(2.18, 1.2), M(0xffffff, { r: 0.3, map: tvScreen, emissive: 0xffffff, emissiveMap: tvScreen, emissiveIntensity: 0.7 }), room.x, 1.68, tvz + 0.035);
+          plant(room.x + room.w / 2 - 0.65, room.z - room.d / 2 + 0.6, 1.15);
+        }
+        return;
+      }
       var emp = lay.employees.filter(function (e) { return e.id === o.employee_id; })[0];
+      var ws = new T.Group(); ws.position.set(o.x, 0, o.z); ws.rotation.y = o.rot || 0; scene.add(ws);
+      // meja
+      add(ws, rbox(2.0, 0.06, 1.0, 0.1), deskWhite, 0, 0.74, 0.2, true, true);
+      [[-0.92, 0.2], [0.92, 0.2]].forEach(function (p) { add(ws, new T.BoxGeometry(0.06, 0.74, 0.9), metalDark, p[0], 0.37, p[1], true); });
+      // monitor menghadap pengguna
+      var scrT = screenTex(emp ? emp.avatar_color : '#64748b');
+      var scrMat = M(0xffffff, { r: 0.25, map: scrT, emissive: 0xffffff, emissiveMap: scrT, emissiveIntensity: 0.45 });
+      add(ws, new T.BoxGeometry(0.82, 0.5, 0.03), metalDark, 0, 1.1, 0.58, true);
+      var scr = add(ws, new T.PlaneGeometry(0.76, 0.44), scrMat, 0, 1.1, 0.56); scr.rotation.y = Math.PI;
+      add(ws, new T.BoxGeometry(0.05, 0.3, 0.05), metalDark, 0, 0.9, 0.6);
+      add(ws, rbox(0.26, 0.02, 0.16, 0.04), metalDark, 0, 0.8, 0.6);
+      add(ws, rbox(0.5, 0.025, 0.16, 0.03), M(0xe5e7eb, { r: 0.5 }), 0, 0.8, -0.08, true);
+      add(ws, new T.CylinderGeometry(0.045, 0.04, 0.1, 14), M(hex(emp ? emp.avatar_color : '#64748b'), { r: 0.4 }), 0.68, 0.85, 0.32, true);
+      add(ws, rbox(0.3, 0.02, 0.22, 0.02), M(0xfafafa), -0.62, 0.8, 0.3).rotation.y = 0.2;
+      officeChair(ws, 0, -0.62, 0);
+      blob(o.x, o.z - 0.1, 2.6);
       if (!emp) return;
-      var av = new T.Group(); av.position.set(o.x, 0, o.z + 1.0);
-      var bodyM = new T.Mesh(new T.CylinderGeometry(0.28, 0.36, 0.95, 18), new T.MeshLambertMaterial({ color: hex(emp.avatar_color) })); bodyM.position.y = 0.48;
-      var head = new T.Mesh(new T.SphereGeometry(0.24, 20, 16), new T.MeshLambertMaterial({ color: 0xf1c7a3 })); head.position.y = 1.18;
-      var ringMat = new T.MeshBasicMaterial({ color: STATE_COLOR.idle, transparent: true, opacity: 1 }), ring = new T.Mesh(new T.TorusGeometry(0.55, 0.05, 8, 40), ringMat); ring.rotation.x = Math.PI / 2; ring.position.y = 0.04;
-      av.add(bodyM); av.add(head); av.add(ring); scene.add(av);
-      [bodyM, head].forEach(function (m) { m.userData.empId = emp.id; pickables.push(m); });
+      var avG = new T.Group(); avG.position.set(0, 0, -0.62); ws.add(avG);
+      var body = new T.Group(); body.scale.setScalar(1.12); avG.add(body);
+      var av = makeAvatar(emp, body); av.headG.scale.setScalar(1.18);
+      [].concat(ws.children).forEach(function (m) { m.traverse(function (x) { if (x.isMesh && x !== scr) { x.userData.empId = emp.id; pickables.push(x); } }); });
+      // indikator status: cincin lantai, orb melayang + glow, gelembung ikon
+      var ringMat = new T.MeshBasicMaterial({ color: STATE_COLOR.idle, transparent: true, opacity: 0.95 });
+      var ring = add(avG, new T.RingGeometry(0.5, 0.58, 48), ringMat, 0, 0.02, 0); ring.rotation.x = -Math.PI / 2;
+      var discMat = new T.MeshBasicMaterial({ color: STATE_COLOR.idle, transparent: true, opacity: 0.12, depthWrite: false });
+      var disc = add(avG, new T.CircleGeometry(0.5, 40), discMat, 0, 0.015, 0); disc.rotation.x = -Math.PI / 2;
+      var orbMat = M(STATE_COLOR.idle, { r: 0.2, m: 0.1, emissive: STATE_COLOR.idle, emissiveIntensity: 0.9 });
+      var orb = add(avG, new T.OctahedronGeometry(0.1, 0), orbMat, 0, 1.95, 0, true);
+      var glow = new T.Sprite(new T.SpriteMaterial({ map: glowMap, color: STATE_COLOR.idle, transparent: true, opacity: 0.55, depthWrite: false, blending: T.AdditiveBlending })); glow.scale.set(0.8, 0.8, 1); glow.position.set(0, 1.95, 0); avG.add(glow);
+      var bub = new T.Sprite(new T.SpriteMaterial({ map: bubbles.queued, transparent: true, depthWrite: false })); bub.scale.set(0.55, 0.55, 1); bub.position.set(0.45, 1.75, 0.05); bub.visible = false; avG.add(bub);
       var el2 = document.createElement('div'); el2.className = 'lbl'; stage.appendChild(el2);
-      avatars[emp.id] = { group: av, ring: ringMat, screen: scrMat, head: head, el: el2, emp: emp, state: 'idle' };
-      labels.push({ el: el2, pos: new T.Vector3(o.x, 1.75, o.z + 1.0), av: avatars[emp.id] });
+      var wp = new T.Vector3(); avG.getWorldPosition(wp);
+      avatars[emp.id] = { av: av, ring: ringMat, disc: discMat, orb: orb, orbMat: orbMat, glow: glow, bub: bub, screen: scrMat, el: el2, emp: emp, state: 'idle', world: wp.clone() };
+      labels.push({ el: el2, pos: new T.Vector3(wp.x, 2.3, wp.z), av: avatars[emp.id] });
     });
-    // kamera orbit
-    function fitR() { var vf = 45 * Math.PI / 180, hf = 2 * Math.atan(Math.tan(vf / 2) * (W / Math.max(1, H))); return Math.min(105, Math.max(26, Math.max(19 / Math.tan(hf / 2), 15 / Math.tan(vf / 2)) * 1.12)); }
-    var target = new T.Vector3(0, 0, -1), sph = { r: fitR(), th: 0.0, ph: 0.78 }, dirty = true, paused = false, raf = 0, last = 0;
-    function placeCam() { sph.ph = Math.max(0.25, Math.min(1.45, sph.ph)); sph.r = Math.max(8, Math.min(110, sph.r)); camera.position.set(target.x + sph.r * Math.sin(sph.ph) * Math.sin(sph.th), target.y + sph.r * Math.cos(sph.ph), target.z + sph.r * Math.sin(sph.ph) * Math.cos(sph.th)); camera.lookAt(target); dirty = true; }
-    placeCam();
-    var el = renderer.domElement, ptrs = {}, drag = null, moved = 0, pinch = 0;
-    el.addEventListener('pointerdown', function (e) { el.setPointerCapture(e.pointerId); ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; drag = { x: e.clientX, y: e.clientY, btn: e.button, shift: e.shiftKey }; moved = 0; var k = Object.keys(ptrs); if (k.length === 2) { pinch = Math.hypot(ptrs[k[0]].x - ptrs[k[1]].x, ptrs[k[0]].y - ptrs[k[1]].y); } });
+    // dekorasi koridor
+    (function () {
+      var backRow = lay.rooms.filter(function (r) { return r.z < 0; }), frontRow = lay.rooms.filter(function (r) { return r.z >= 0; });
+      if (!backRow.length || !frontRow.length) return;
+      var cz = ((Math.max.apply(null, backRow.map(function (r) { return r.z + r.d / 2; }))) + (Math.min.apply(null, frontRow.map(function (r) { return r.z - r.d / 2; })))) / 2;
+      plant(minX + 0.6, cz, 1.25); plant(maxX - 0.6, cz, 1.25);
+      var sg = new T.Group(); sg.position.set(wallCx, 0, cz - 0.55); scene.add(sg);
+      var sofa = M(0x41557a, { r: 0.9 });
+      add(sg, rbox(2.4, 0.4, 0.8, 0.14), sofa, 0, 0.05, 0, true, true); add(sg, rbox(2.4, 0.5, 0.22, 0.1), sofa, 0, 0.3, -0.32, true);
+      add(sg, rbox(1.08, 0.12, 0.6, 0.1), M(0x5a6f96, { r: 0.95 }), -0.58, 0.45, 0.05, true); add(sg, rbox(1.08, 0.12, 0.6, 0.1), M(0x5a6f96, { r: 0.95 }), 0.58, 0.45, 0.05, true);
+      add(sg, new T.CylinderGeometry(0.42, 0.42, 0.04, 28), woodMat, 0, 0.42, 1.0, true, true); add(sg, new T.CylinderGeometry(0.05, 0.05, 0.4, 10), metalDark, 0, 0.2, 1.0);
+      add(sg, new T.CylinderGeometry(0.05, 0.045, 0.1, 12), M(0xffffff), 0.12, 0.49, 1.02);
+    })();
+
+    // ---------- tema siang / malam ----------
+    var dark = function () { return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim().indexOf('#0') === 0; };
+    function applyTheme() {
+      var night = dark();
+      hemi.intensity = night ? 0.3 : 0.55; hemi.color.setHex(night ? 0x9fb2d9 : 0xffffff); hemi.groundColor.setHex(night ? 0x1a2238 : 0xb7c3d6);
+      sun.intensity = night ? 0.32 : 1.0; sun.color.setHex(night ? 0x9db5ff : 0xfff1e0);
+      fill.intensity = night ? 0.1 : 0.22;
+      floorMat.color.setHex(night ? 0x5d6a86 : 0xffffff);
+      paneMat.map = night ? skyNight : skyDay; paneMat.emissiveMap = paneMat.map; paneMat.emissiveIntensity = night ? 1 : 0.85; paneMat.needsUpdate = true;
+      roomLights.forEach(function (l) { l.intensity = night ? 1.1 : 0; });
+      scene.fog.color.setHex(night ? 0x0c1529 : 0xeef2f9);
+      renderer.toneMappingExposure = night ? 1.0 : 0.92;
+      dirty = true;
+    }
+
+    // ---------- kamera ----------
+    var PORTRAIT = W / Math.max(1, H) < 0.95;
+    var HOME = PORTRAIT ? { tx: CX, ty: 0, tz: CZ, ph: 0.82, th: 1.12 } : { tx: CX, ty: 0, tz: CZ, ph: 0.86, th: 0 };
+    /** Bingkai kamera dari proyeksi sudut-sudut kantor (memperhitungkan perspektif) + pemusatan ulang. */
+    function fitView() {
+      var cam = new T.PerspectiveCamera(42, W / Math.max(1, H), 0.5, 400), v = new T.Vector3(), ray = new T.Raycaster(), ground = new T.Plane(new T.Vector3(0, 1, 0), 0), hit = new T.Vector3();
+      var pts = [[minX, 0, backZ], [maxX, 0, backZ], [minX, 0, maxZ], [maxX, 0, maxZ], [minX, 2.9, backZ], [maxX, 2.9, backZ], [minX, 1.6, maxZ], [maxX, 1.6, maxZ]];
+      var tx = CX, tz = CZ, th = HOME.th, ph = HOME.ph, limX = PORTRAIT ? 1.22 : 0.95, limY = PORTRAIT ? 0.98 : 0.9; // potret: sisi kiri/kanan boleh sedikit terpotong (bisa digeser)
+      function ext(r) {
+        cam.position.set(tx + r * Math.sin(ph) * Math.sin(th), r * Math.cos(ph), tz + r * Math.sin(ph) * Math.cos(th)); cam.lookAt(tx, 0, tz); cam.updateMatrixWorld();
+        var b = [9, -9, 9, -9]; pts.forEach(function (p) { v.set(p[0], p[1], p[2]).project(cam); b[0] = Math.min(b[0], v.x); b[1] = Math.max(b[1], v.x); b[2] = Math.min(b[2], v.y); b[3] = Math.max(b[3], v.y); }); return b;
+      }
+      var r = 40;
+      for (var it = 0; it < 4; it++) {
+        var lo = 8, hi = 160;
+        for (var k = 0; k < 24; k++) { var mid = (lo + hi) / 2, b = ext(mid); if ((b[1] - b[0]) / 2 <= limX && (b[3] - b[2]) / 2 <= limY) hi = mid; else lo = mid; }
+        r = hi; var e = ext(r), cx = (e[0] + e[1]) / 2, cy = (e[2] + e[3]) / 2;
+        if (Math.abs(cx) < 0.01 && Math.abs(cy) < 0.01) break;
+        ray.setFromCamera({ x: cx, y: cy }, cam); if (ray.ray.intersectPlane(ground, hit)) { tx = hit.x; tz = hit.z; }
+      }
+      return { tx: tx, tz: tz, r: r };
+    }
+    var FIT = fitView(); HOME.tx = FIT.tx; HOME.tz = FIT.tz;
+    var R_MAX = Math.max(115, FIT.r * 1.35);
+    function fitR() { return FIT.r; }
+    var target = new T.Vector3(HOME.tx, HOME.ty, HOME.tz), sph = { r: fitR(), th: HOME.th, ph: HOME.ph }, dirty = true, paused = false, raf = 0, last = 0, camAnim = null;
+    function placeCam() { sph.ph = Math.max(0.22, Math.min(1.42, sph.ph)); sph.r = Math.max(5, Math.min(R_MAX, sph.r)); camera.position.set(target.x + sph.r * Math.sin(sph.ph) * Math.sin(sph.th), target.y + sph.r * Math.cos(sph.ph), target.z + sph.r * Math.sin(sph.ph) * Math.cos(sph.th)); camera.lookAt(target); dirty = true; }
+    function animateCam(to, ms) {
+      if (reduced) { target.set(to.tx, to.ty, to.tz); sph.r = to.r; sph.th = to.th; sph.ph = to.ph; placeCam(); return; }
+      camAnim = { from: { tx: target.x, ty: target.y, tz: target.z, r: sph.r, th: sph.th, ph: sph.ph }, to: to, t0: performance.now(), ms: ms || 700 };
+    }
+    function homeView() { return { tx: HOME.tx, ty: HOME.ty, tz: HOME.tz, r: fitR(), th: HOME.th, ph: HOME.ph }; }
+    if (!reduced) { sph.r = fitR() * 1.55; sph.ph = 0.42; sph.th = -0.65; placeCam(); animateCam(homeView(), 1700); } else placeCam();
+    applyTheme();
+
+    var el = renderer.domElement, ptrs = {}, drag = null, moved = 0, pinch = 0, hovered = null, lastHover = 0;
+    function pick(cx, cy) { var rect = el.getBoundingClientRect(), m = new T.Vector2((cx - rect.left) / rect.width * 2 - 1, -(cy - rect.top) / rect.height * 2 + 1), rc = new T.Raycaster(); rc.setFromCamera(m, camera); var hit = rc.intersectObjects(pickables)[0]; return hit ? hit.object.userData.empId : null; }
+    function setHover(id) {
+      if (hovered === id) return;
+      if (hovered && avatars[hovered]) { avatars[hovered].el.classList.remove('hov'); if (avatars[hovered].av.shirt.emissive) avatars[hovered].av.shirt.emissive.setHex(0); }
+      hovered = id; el.style.cursor = id ? 'pointer' : '';
+      if (id && avatars[id]) { avatars[id].el.classList.add('hov'); if (avatars[id].av.shirt.emissive) avatars[id].av.shirt.emissive.setHex(0x1c2a44); }
+      dirty = true;
+    }
+    el.addEventListener('pointerdown', function (e) { el.setPointerCapture(e.pointerId); ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; drag = { x: e.clientX, y: e.clientY, btn: e.button, shift: e.shiftKey }; moved = 0; camAnim = null; var k = Object.keys(ptrs); if (k.length === 2) pinch = Math.hypot(ptrs[k[0]].x - ptrs[k[1]].x, ptrs[k[0]].y - ptrs[k[1]].y); });
     el.addEventListener('pointermove', function (e) {
-      if (!ptrs[e.pointerId]) return; ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; var k = Object.keys(ptrs);
+      if (!ptrs[e.pointerId]) { if (e.pointerType === 'mouse' && performance.now() - lastHover > 60) { lastHover = performance.now(); setHover(pick(e.clientX, e.clientY)); } return; }
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY }; var k = Object.keys(ptrs);
       if (k.length === 2) { var d = Math.hypot(ptrs[k[0]].x - ptrs[k[1]].x, ptrs[k[0]].y - ptrs[k[1]].y); if (pinch) sph.r *= pinch / d; pinch = d; moved += 10; placeCam(); return; }
       if (!drag) return; var dx = e.clientX - drag.x, dy = e.clientY - drag.y; moved += Math.abs(dx) + Math.abs(dy); drag.x = e.clientX; drag.y = e.clientY;
-      if (drag.btn === 2 || drag.shift) { var f = sph.r / 600, s = Math.sin(sph.th), c = Math.cos(sph.th); target.x -= (dx * c + dy * s) * f; target.z -= (-dx * s + dy * c) * f; target.x = Math.max(-24, Math.min(24, target.x)); target.z = Math.max(-16, Math.min(16, target.z)); }
+      if (drag.btn === 2 || drag.shift) { var f = sph.r / 600, s = Math.sin(sph.th), c = Math.cos(sph.th); target.x -= (dx * c + dy * s) * f; target.z -= (-dx * s + dy * c) * f; target.x = Math.max(minX - 4, Math.min(maxX + 4, target.x)); target.z = Math.max(backZ - 4, Math.min(maxZ + 4, target.z)); }
       else { sph.th -= dx * 0.008; sph.ph -= dy * 0.006; }
       placeCam();
     });
     var up = function (e) {
       delete ptrs[e.pointerId]; if (Object.keys(ptrs).length < 2) pinch = 0;
-      if (drag && moved < 6) { var rect = el.getBoundingClientRect(), m = new T.Vector2((e.clientX - rect.left) / rect.width * 2 - 1, -(e.clientY - rect.top) / rect.height * 2 + 1), rc = new T.Raycaster(); rc.setFromCamera(m, camera); var hit = rc.intersectObjects(pickables)[0]; if (hit) onPick(hit.object.userData.empId); }
+      if (drag && moved < 6) {
+        var id = pick(e.clientX, e.clientY);
+        if (id && avatars[id]) { var w = avatars[id].world; animateCam({ tx: w.x, ty: 0.9, tz: w.z, r: Math.min(sph.r, 11), th: sph.th, ph: Math.min(sph.ph, 0.95) }, 650); onPick(id); }
+      }
       drag = null;
     };
-    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-    el.addEventListener('wheel', function (e) { e.preventDefault(); sph.r *= e.deltaY > 0 ? 1.1 : 0.9; placeCam(); }, { passive: false });
-    var ro = window.ResizeObserver ? new ResizeObserver(function () { W = stage.clientWidth; H = stage.clientHeight; if (!W || !H) return; renderer.setSize(W, H); camera.aspect = W / H; camera.updateProjectionMatrix(); dirty = true; }) : null;
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('pointerleave', function () { setHover(null); });
+    el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    el.addEventListener('wheel', function (e) { e.preventDefault(); camAnim = null; sph.r *= e.deltaY > 0 ? 1.1 : 0.9; placeCam(); }, { passive: false });
+    var ro = window.ResizeObserver ? new ResizeObserver(function () { W = stage.clientWidth; H = stage.clientHeight; if (!W || !H) return; renderer.setSize(W, H); camera.aspect = W / H; camera.updateProjectionMatrix(); FIT = fitView(); HOME.tx = FIT.tx; HOME.tz = FIT.tz; R_MAX = Math.max(115, FIT.r * 1.35); dirty = true; }) : null;
     if (ro) ro.observe(stage);
     var v3 = new T.Vector3();
     function updateLabels() {
@@ -567,36 +916,67 @@
         if (vis) { l.el.style.left = ((v3.x + 1) / 2 * W) + 'px'; l.el.style.top = ((1 - v3.y) / 2 * H) + 'px'; }
       });
     }
+    function ease(k) { return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; }
+    function lerp(a, b, k) { return a + (b - a) * k; }
+    function animateAvatar(a, t) {
+      var p = a.av.pose, s = a.state, k = 0.14, ph = a.av.phase;
+      var tgt = { sh: -0.7, el: 0.55, rsh: -0.7, rel: 0.55, rz: 0, hx: 0.05, hy: 0 };
+      if (s === 'working') { tgt.hx = 0.16 + Math.sin(t / 260) * 0.03; tgt.el = 0.55 + Math.sin(t / 85 + ph) * 0.09; tgt.rel = 0.55 + Math.sin(t / 85 + ph + Math.PI) * 0.09; }
+      else if (s === 'waiting') { tgt.rsh = -2.75; tgt.rel = 0.25; tgt.rz = -0.25 + Math.sin(t / 220) * 0.18; tgt.hy = Math.sin(t / 900 + ph) * 0.2; tgt.hx = -0.05; }
+      else if (s === 'error') { tgt.hx = 0.38; tgt.sh = -0.35; tgt.rsh = -0.35; tgt.el = 0.2; tgt.rel = 0.2; }
+      else if (s === 'queued') { tgt.hy = Math.sin(t / 700 + ph) * 0.35; tgt.hx = 0; }
+      else if (HQ || Q === 'mid') { tgt.hy = Math.sin(t / 2600 + ph) * 0.3; }
+      Object.keys(tgt).forEach(function (key) { p[key] = lerp(p[key], tgt[key], k); });
+      a.av.L.sh.rotation.x = p.sh; a.av.L.el.rotation.x = p.el; a.av.R.sh.rotation.x = p.rsh; a.av.R.el.rotation.x = p.rel; a.av.R.sh.rotation.z = p.rz;
+      a.av.headG.rotation.x = p.hx; a.av.headG.rotation.y = p.hy;
+      a.av.torsoG.scale.y = 1 + Math.sin(t / 900 + ph) * 0.012;
+      if (t > a.av.blinkAt) { a.av.blinkAt = t + 2500 + Math.random() * 3500; a.av.blinkEnd = t + 120; }
+      var eyeS = t < (a.av.blinkEnd || 0) ? 0.15 : 1; a.av.eyes.forEach(function (e) { e.scale.y = eyeS; });
+      a.orb.rotation.y += 0.035; a.orb.position.y = 1.95 + Math.sin(t / 500 + ph) * 0.04; a.glow.position.y = a.orb.position.y;
+      var pulse = s === 'working' ? 0.55 + Math.sin(t / 240) * 0.25 : s === 'waiting' || s === 'error' ? 0.45 + Math.sin(t / 380) * 0.3 : 0.35;
+      a.glow.material.opacity = pulse;
+      if (a.bub.visible) a.bub.position.y = 1.75 + Math.sin(t / 420 + ph) * 0.04;
+      a.screen.emissiveIntensity = s === 'working' ? 0.85 + Math.sin(t / 140) * 0.12 : 0.45;
+    }
+    var ema = 0, nFrames = 0, prevT = 0, slowFired = false, acc = 0;
     function loop(t) {
       raf = requestAnimationFrame(loop);
-      if (paused) return;
-      var anim = Object.keys(avatars).some(function (k) { var a = avatars[k]; return a.state === 'working' || a.state === 'waiting' || a.state === 'queued'; });
-      if (!dirty && !anim) return;
-      if (anim && t - last < 33) return; // ~30 fps saat animasi
+      if (paused) { prevT = 0; return; }
+      // Kualitas adaptif: bila jeda antar-frame rata-rata > 55 ms (perangkat kewalahan), turunkan kualitas satu tingkat.
+      if (prevT) { var d = Math.min(1000, t - prevT); ema = ema ? ema * 0.85 + d * 0.15 : d; nFrames++; acc += d; }
+      prevT = t;
+      if (!slowFired && onSlow && acc > 3000 && nFrames >= 8 && ema > 55 && Q !== 'low' && store.get('gfx', 'auto') === 'auto') { slowFired = true; setTimeout(function () { onSlow(Q); }, 0); }
+      if (camAnim) {
+        var kk = Math.min(1, (t - camAnim.t0) / camAnim.ms), e = ease(Math.max(0, kk)), f = camAnim.from, to = camAnim.to;
+        target.set(lerp(f.tx, to.tx, e), lerp(f.ty, to.ty, e), lerp(f.tz, to.tz, e)); sph.r = lerp(f.r, to.r, e); sph.th = lerp(f.th, to.th, e); sph.ph = lerp(f.ph, to.ph, e); placeCam();
+        if (kk >= 1) camAnim = null;
+      }
+      var live = !LOW && !reduced, busy = Object.keys(avatars).some(function (k) { return avatars[k].state !== 'idle' && avatars[k].state !== 'inactive'; });
+      if (!dirty && !live && !busy) return;
+      if (!dirty && t - last < 33) return; // ±30 fps untuk animasi latar, 60 fps saat kamera digerakkan
       last = t;
-      Object.keys(avatars).forEach(function (k) {
-        var a = avatars[k];
-        if (a.state === 'working') { a.head.position.y = 1.18 + Math.sin(t / 220) * 0.04; a.screen.emissive.setHex(0x0e7a52); a.screen.emissiveIntensity = 0.6 + Math.sin(t / 300) * 0.25; }
-        else { a.head.position.y = 1.18; a.screen.emissive.setHex(a.state === 'queued' ? 0x163d99 : 0x000000); }
-        if (a.state === 'waiting') a.ring.opacity = 0.5 + Math.sin(t / 400) * 0.5;
-      });
+      Object.keys(avatars).forEach(function (k) { animateAvatar(avatars[k], t); });
       renderer.render(scene, camera); updateLabels(); dirty = false;
     }
     raf = requestAnimationFrame(loop);
     this.setStatuses = function (st) {
       Object.keys(avatars).forEach(function (id) {
-        var a = avatars[id], s = (st[id] || {}).state || 'idle'; a.state = s;
-        a.ring.color.setHex(STATE_COLOR[s] || STATE_COLOR.idle); a.ring.opacity = 1;
+        var a = avatars[id], s = (st[id] || {}).state || 'idle', col = STATE_COLOR[s] || STATE_COLOR.idle; a.state = s;
+        a.ring.color.setHex(col); a.disc.color.setHex(col); a.orbMat.color.setHex(col); if (a.orbMat.emissive) a.orbMat.emissive.setHex(col); a.glow.material.color.setHex(col);
+        a.bub.visible = !!bubbles[s]; if (bubbles[s]) { a.bub.material.map = bubbles[s]; a.bub.material.needsUpdate = true; }
         a.el.innerHTML = esc(a.emp.name) + ' · ' + esc(LABEL[s] || s) + ((st[id] || {}).task_title ? '<small>' + esc(st[id].task_title) + '</small>' : '<small>' + esc(a.emp.title) + '</small>');
       });
       dirty = true;
     };
-    this.control = function (c) { if (c === 'in') sph.r *= 0.8; else if (c === 'out') sph.r *= 1.25; else { target.set(0, 0, -1); sph.r = fitR(); sph.th = 0; sph.ph = 0.78; } placeCam(); };
+    this.control = function (c) { camAnim = null; if (c === 'in') sph.r *= 0.8; else if (c === 'out') sph.r *= 1.25; else { animateCam(homeView(), 700); return; } placeCam(); };
     this.setPaused = function (p) { paused = p; dirty = true; };
-    this.themeChanged = function () { setTimeout(function () { floorMat.color.setHex(dark() ? 0x16223a : 0xe9eef6); dirty = true; }, 30); };
+    this.themeChanged = function () { setTimeout(applyTheme, 30); };
+    this.quality = Q;
+    this.stats = function () { return { quality: Q, frameMs: Math.round(ema), frames: nFrames, adaptive: slowFired }; };
     this.destroy = function () {
       cancelAnimationFrame(raf); if (ro) ro.disconnect();
-      scene.traverse(function (o) { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+      scene.traverse(function (o) { if (o.geometry) o.geometry.dispose(); if (o.material) [].concat(o.material).forEach(function (m) { m.dispose(); }); });
+      disposables.forEach(function (t) { t.dispose(); });
       renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss();
       labels.forEach(function (l) { l.el.remove(); }); el.remove();
     };
@@ -605,8 +985,11 @@
 
   /** Fallback dashboard 2D (SVG) — tanpa WebGL / perangkat lemah. */
   function Office2D(stage, lay, onPick) {
-    var sx = function (x) { return (x + 24) * 20; }, sz = function (z) { return (z + 16) * 20; }, z = 1;
-    var svg = '<svg viewBox="0 0 960 640" style="width:100%;height:100%" id="o2d"><g id="o2g">' + lay.rooms.map(function (r) {
+    var bx0 = Math.min.apply(null, lay.rooms.map(function (r) { return r.x - r.w / 2; })) - 2, bx1 = Math.max.apply(null, lay.rooms.map(function (r) { return r.x + r.w / 2; })) + 2;
+    var bz0 = Math.min.apply(null, lay.rooms.map(function (r) { return r.z - r.d / 2; })) - 2, bz1 = Math.max.apply(null, lay.rooms.map(function (r) { return r.z + r.d / 2; })) + 2.5;
+    var VW = (bx1 - bx0) * 20, VH = (bz1 - bz0) * 20;
+    var sx = function (x) { return (x - bx0) * 20; }, sz = function (z) { return (z - bz0) * 20; }, z = 1;
+    var svg = '<svg viewBox="0 0 ' + VW + ' ' + VH + '" style="width:100%;height:100%" id="o2d"><g id="o2g">' + lay.rooms.map(function (r) {
       return '<rect x="' + sx(r.x - r.w / 2) + '" y="' + sz(r.z - r.d / 2) + '" width="' + r.w * 20 + '" height="' + r.d * 20 + '" rx="10" fill="' + esc(r.color) + '" fill-opacity=".12" stroke="' + esc(r.color) + '" stroke-width="2"/><text x="' + sx(r.x) + '" y="' + (sz(r.z - r.d / 2) + 22) + '" text-anchor="middle" font-size="13" font-weight="700" fill="currentColor" opacity=".6">' + esc(r.name.toUpperCase()) + '</text>';
     }).join('') + lay.objects.map(function (o) {
       if (o.type === 'meeting_table') return '<circle cx="' + sx(o.x) + '" cy="' + sz(o.z) + '" r="40" fill="#8b6b4a" opacity=".5"/>';
@@ -617,7 +1000,7 @@
     $$('.o2e', wrap).forEach(function (g) { g.addEventListener('click', function () { onPick(g.getAttribute('data-emp')); }); });
     var g = $('#o2g', wrap);
     this.setStatuses = function (st) { $$('.o2e', wrap).forEach(function (n) { var s = (st[n.getAttribute('data-emp')] || {}).state || 'idle'; $('.ring', n).setAttribute('stroke', '#' + (STATE_COLOR[s] || STATE_COLOR.idle).toString(16).padStart(6, '0')); var e = lay.employees.filter(function (x) { return x.id === n.getAttribute('data-emp'); })[0]; $('.st', n).textContent = e.name + ' · ' + (LABEL[s] || s); }); };
-    this.control = function (c) { z = c === 'in' ? z * 1.2 : c === 'out' ? z / 1.2 : 1; z = Math.max(0.6, Math.min(3, z)); g.setAttribute('transform', 'translate(' + 480 * (1 - z) + ' ' + 320 * (1 - z) + ') scale(' + z + ')'); };
+    this.control = function (c) { z = c === 'in' ? z * 1.2 : c === 'out' ? z / 1.2 : 1; z = Math.max(0.6, Math.min(3, z)); g.setAttribute('transform', 'translate(' + VW / 2 * (1 - z) + ' ' + VH / 2 * (1 - z) + ') scale(' + z + ')'); };
     this.setPaused = function () { }; this.themeChanged = function () { };
     this.destroy = function () { wrap.remove(); };
   }
@@ -828,12 +1211,38 @@
   VIEWS.employees = function (v) {
     return api('GET', '/employees').then(function (list) {
       S.employees = list;
-      v.innerHTML = '<div class="row" style="margin-bottom:12px"><div><h1 style="margin:0">Karyawan AI</h1><div class="muted small">Setiap karyawan punya instruksi, tool, izin data, batas biaya & kriteria mutu yang berbeda.</div></div>' + (can('employee.manage') ? '<button class="btn sm primary right" id="eNew">' + ico('plus', 14) + 'Karyawan baru</button>' : '') + '</div>' +
+      v.innerHTML = '<div class="row" style="margin-bottom:12px"><div><h1 style="margin:0">Karyawan AI</h1><div class="muted small">Setiap karyawan punya instruksi, tool, izin data, batas biaya & kriteria mutu yang berbeda.</div></div>' + (can('employee.manage') ? '<div class="right row"><button class="btn sm" id="eTpl">' + ico('grid', 14) + 'Dari templat jabatan</button><button class="btn sm primary" id="eNew">' + ico('plus', 14) + 'Karyawan baru</button></div>' : '') + '</div>' +
         '<div class="grid g3">' + list.map(function (e) { var st = (S.statuses[e.id] || e.live).state; return '<div class="card emp-card" data-emp="' + esc(e.id) + '"><div class="row"><span class="avatar" style="width:46px;height:46px;background:' + esc(e.avatar_color) + ';color:#fff">' + esc(initials(e.name)) + '</span><div class="grow" style="min-width:0"><b>' + esc(e.title) + '</b><div class="small muted">' + esc(e.name) + ' · ' + esc(e.department) + '</div></div>' + chip(st) + '</div><div class="row" style="margin-top:10px;gap:5px">' + e.tools.map(function (t) { return '<span class="chip plain mono" style="font-size:10.5px">' + esc(t) + '</span>'; }).join('') + '</div><div class="row small muted" style="margin-top:10px"><span>✔ ' + e.performance.completed + '</span><span>✘ ' + e.performance.failed + '</span><span>QA ' + (e.performance.avg_qa == null ? '—' : e.performance.avg_qa) + '</span><span>⌀ ' + e.performance.avg_sec + ' dtk</span><span class="right">' + usd(e.performance.cost_usd) + '</span></div>' + (e.status !== 'active' ? '<div style="margin-top:6px">' + chip('inactive') + '</div>' : '') + '</div>'; }).join('') + '</div>';
       $$('[data-emp]', v).forEach(function (c) { c.onclick = function () { openEmployee(c.getAttribute('data-emp')); }; });
       var n = $('#eNew'); if (n) n.onclick = function () { editEmployee(null); };
+      var tp = $('#eTpl'); if (tp) tp.onclick = openTemplates;
     });
   };
+  /** Galeri templat jabatan: sekali klik → departemen + ruangan 3D + karyawan AI + meja. */
+  function openTemplates() {
+    var m = modal({ title: 'Templat jabatan', wide: true, body: '<p class="small muted" style="margin-top:0">Sekali klik membuat karyawan AI lengkap (instruksi, tool, kriteria QA). Bila departemennya belum ada, departemen & ruangannya di kantor 3D dibuat otomatis.</p><div id="tplGrid" class="grid g2"><div class="muted">Memuat…</div></div>', buttons: [{ text: 'Tutup' }] });
+    var draw = function () {
+      return api('GET', '/templates/positions', {}, { noCache: true }).then(function (list) {
+        $('#tplGrid', m.el).innerHTML = list.map(function (t) {
+          return '<div class="card col tpl" style="gap:6px;border-left:4px solid ' + esc(t.color) + '"><div class="row"><b>' + esc(t.title) + '</b>' + (t.installed ? '<span class="chip s-working right">Terpasang</span>' : '') + '</div>' +
+            '<div class="small muted">' + esc(t.name) + ' · ' + esc(t.department) + (t.department_exists ? '' : ' <span class="chip plain" style="font-size:10px">+ ruangan baru</span>') + (t.approval_policy === 'always' ? ' <span class="chip plain" style="font-size:10px">selalu approval</span>' : '') + '</div>' +
+            '<div class="small">' + esc((t.responsibilities || []).slice(0, 3).join(' · ')) + '</div>' +
+            '<div class="row" style="gap:4px">' + t.tools.map(function (x) { return '<span class="chip plain mono" style="font-size:10px">' + esc(x) + '</span>'; }).join('') + '</div>' +
+            '<button class="btn sm ' + (t.installed ? '' : 'primary') + '" data-tpl="' + esc(t.key) + '" style="align-self:flex-start">' + (t.installed ? 'Tambah lagi' : 'Tambah ke kantor') + '</button></div>';
+        }).join('');
+        $$('[data-tpl]', m.el).forEach(function (b) {
+          b.onclick = function () {
+            b.disabled = true;
+            api('POST', '/templates/positions/' + b.getAttribute('data-tpl') + '/apply', {}).then(function (r) {
+              officeChanged(); toast((r.title || 'Karyawan') + ' ditambahkan' + (r.room_created ? ' + ruangan baru di kantor 3D.' : '.'), 'ok'); draw();
+              if (S.view === 'employees') route();
+            }).catch(function (e) { b.disabled = false; fail(e); });
+          };
+        });
+      }).catch(fail);
+    };
+    draw();
+  }
   function editEmployee(e) {
     Promise.all([api('GET', '/tools'), api('GET', '/departments')]).then(function (x) {
       var tools = x[0], depts = x[1], isNew = !e; e = e || { tools: [], skills: [], model_config: { temperature: 0.3, max_output_tokens: 2048 }, quality_criteria: { min_score: 70, rules: [] }, approval_policy: 'risk_based', cost_limit_task_usd: 0.05, cost_limit_daily_usd: 1, timeout_sec: 120, responsibilities: [], avatar_color: '#475569', status: 'active', data_permissions: { read: ['artifacts'], write: [] } };
@@ -857,7 +1266,7 @@
           var lines = function (id) { return $(id, bg).value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean); };
           var body = { name: $('#ecName', bg).value, title: $('#ecTitle', bg).value, department_id: $('#ecDept', bg).value, status: $('#ecStatus', bg).value, approval_policy: $('#ecAppr', bg).value, avatar_color: $('#ecColor', bg).value, cost_limit_task_usd: +$('#ecCT', bg).value, cost_limit_daily_usd: +$('#ecCD', bg).value, timeout_sec: +$('#ecTO', bg).value, model_config: { model: $('#ecModel', bg).value.trim(), temperature: +$('#ecTemp', bg).value, max_output_tokens: (e.model_config || {}).max_output_tokens || 2048 }, quality_criteria: { min_score: +$('#ecQ', bg).value, rules: lines('#ecRules') }, system_instructions: $('#ecSys', bg).value, responsibilities: lines('#ecResp'), skills: lines('#ecSkills').map(function (l) { var p = l.split(':'); return { skill: p[0], level: +p[1] || 3 }; }), tools: $$('.ecTool', bg).filter(function (c) { return c.checked; }).map(function (c) { return c.value; }) };
           if (isNew) body.code = $('#ecCode', bg).value;
-          return api(isNew ? 'POST' : 'PUT', isNew ? '/employees' : '/employees/' + e.id, body).then(function () { toast('Tersimpan.', 'ok'); S.employees = []; route(); });
+          return api(isNew ? 'POST' : 'PUT', isNew ? '/employees' : '/employees/' + e.id, body).then(function () { toast('Tersimpan.', 'ok'); officeChanged(); route(); });
         } }]
       });
     }).catch(fail);
@@ -959,7 +1368,7 @@
       el.innerHTML = '<div class="grid g2"><div class="card col"><h3>Identitas & header</h3><div class="row"><img class="logo" id="soLogo" style="width:88px;height:88px" src="' + esc(b.logo || DEFAULT_LOGO) + '" alt="Logo"><div class="small muted">Klik logo untuk zoom.<br>Logo dikompres otomatis ≤512px.</div></div>' +
         '<label class="f">Nama organisasi<input class="i" id="soName" value="' + esc(S.me.org.name) + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Judul header<input class="i" id="soTitle" maxlength="60" value="' + esc(b.title) + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Subjudul<input class="i" id="soSub" maxlength="80" value="' + esc(b.subtitle) + '"' + (can('org.manage') ? '' : ' disabled') + '></label>' +
         (can('org.manage') ? '<div class="row"><button class="btn" id="soUp">Ganti logo</button><button class="btn primary" id="soSave">Simpan</button></div>' : '') + '</div>' +
-        '<div class="card"><h3>Departemen</h3><div id="soDepts" class="col"></div>' + (can('department.manage') ? '<div class="row" style="margin-top:10px"><input class="i" id="sdCode" placeholder="KODE" style="max-width:100px"><input class="i grow" id="sdName" placeholder="Nama departemen"><button class="btn" id="sdAdd">Tambah</button></div>' : '') + '</div>' +
+        '<div class="card"><h3>Departemen</h3><div id="soDepts" class="col"></div>' + (can('department.manage') ? '<div class="row" style="margin-top:10px"><input class="i" id="sdCode" placeholder="KODE" style="max-width:100px"><input class="i grow" id="sdName" placeholder="Nama departemen"><input class="i" id="sdColor" type="color" value="#0ea5e9" title="Warna ruangan" style="width:46px;padding:2px"><button class="btn" id="sdAdd">Tambah</button></div><div class="small muted" style="margin-top:6px">Setiap departemen baru otomatis mendapat ruangan sendiri di kantor 3D. Isi dengan karyawan AI lewat menu Karyawan AI → Templat jabatan.</div>' : '') + '</div>' +
         '<div class="card col"><h3>Dokumen hukum & pelindungan data</h3><p class="small muted">Dipakai di Syarat & Ketentuan dan Pemberitahuan Privasi (organisasi = pengendali data). Pengguna diminta menyetujui dokumen saat pertama login.</p><label class="f">Email kontak pelindungan data<input class="i" id="slMail" type="email" value="' + esc(((S.me.org.legal || {}).contact_email) || '') + '"' + (can('org.manage') ? '' : ' disabled') + '></label><label class="f">Nama penyedia aplikasi<input class="i" id="slProv" maxlength="120" value="' + esc(((S.me.org.legal || {}).provider_name) || '') + '"' + (can('org.manage') ? '' : ' disabled') + '></label><div class="row">' + (can('org.manage') ? '<button class="btn primary" id="slSave">Simpan</button>' : '') + '<button class="btn" data-legal="terms">Lihat S&amp;K</button><button class="btn" data-legal="privacy">Lihat Privasi</button></div></div></div>';
       var newLogo;
       $('#soLogo').onclick = function () { zoomImage(this.src, 'Logo'); };
@@ -969,17 +1378,26 @@
       }
       bindLegalLinks(el);
       var sl = $('#slSave'); if (sl) sl.onclick = function () { api('PUT', '/settings', { legal_contact_email: $('#slMail').value.trim(), legal_provider_name: $('#slProv').value.trim() }).then(function (r) { S.me.org.legal = { contact_email: r.legal_contact_email || '', provider_name: r.legal_provider_name || '' }; store.set('me', S.me); toast('Tersimpan.', 'ok'); }).catch(fail); };
-      api('GET', '/departments').then(function (d) { $('#soDepts').innerHTML = d.map(function (x) { return '<div class="row"><i class="dot" style="background:' + esc(x.color) + '"></i><b>' + esc(x.name) + '</b><span class="mono small muted">' + esc(x.code) + '</span></div>'; }).join(''); });
-      var add = $('#sdAdd'); if (add) add.onclick = function () { api('POST', '/departments', { code: $('#sdCode').value, name: $('#sdName').value }).then(function () { toast('Departemen ditambahkan.', 'ok'); route(); }).catch(fail); };
+      api('GET', '/departments').then(function (d) { var box = $('#soDepts'); if (box) box.innerHTML = d.map(function (x) { return '<div class="row"><i class="dot" style="background:' + esc(x.color) + '"></i><b>' + esc(x.name) + '</b><span class="mono small muted">' + esc(x.code) + '</span></div>'; }).join(''); });
+      var add = $('#sdAdd'); if (add) add.onclick = function () { add.disabled = true; api('POST', '/departments', { code: $('#sdCode').value, name: $('#sdName').value, color: $('#sdColor').value }).then(function (d) { officeChanged(); toast('Departemen ditambahkan' + (d.room_created ? ' — ruangan baru sudah muncul di Kantor.' : '.'), 'ok'); route(); }).catch(function (e) { add.disabled = false; fail(e); }); };
     },
     members: function (el) {
-      return api('GET', '/org/members', {}, { noCache: true }).then(function (list) {
-        el.innerHTML = '<div class="card" style="padding:0"><div class="tbl-wrap" style="border:0"><table class="t"><thead><tr><th>Nama</th><th>Email</th><th>Peran</th><th>Status</th><th class="hide-m">Login terakhir</th><th></th></tr></thead><tbody>' + list.map(function (m) { return '<tr><td><b>' + esc(m.name) + '</b></td><td class="small">' + esc(m.email) + '</td><td>' + (can('member.manage') && m.user_id !== S.me.user.id ? '<select class="i" data-role="' + esc(m.id) + '" style="width:auto;padding:4px 8px">' + ['viewer', 'member', 'manager', 'admin', 'owner'].map(function (r) { return '<option' + (r === m.role ? ' selected' : '') + '>' + r + '</option>'; }).join('') + '</select>' : '<span class="chip plain">' + esc(m.role) + '</span>') + '</td><td>' + chip(m.status) + '</td><td class="hide-m small muted">' + fmtDate(m.last_login_at) + '</td><td>' + (can('member.manage') && m.user_id !== S.me.user.id ? '<button class="btn sm" data-sus="' + esc(m.id) + '" data-st="' + (m.status === 'active' ? 'suspended' : 'active') + '">' + (m.status === 'active' ? 'Tangguhkan' : 'Aktifkan') + '</button> <button class="btn sm" data-pw="' + esc(m.id) + '">Reset sandi</button>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>' +
-          (can('member.manage') ? '<div class="card" style="margin-top:14px"><h3>Tambah anggota</h3><div class="grid g4"><input class="i" id="nmName" placeholder="Nama"><input class="i" id="nmEmail" type="email" placeholder="Email"><input class="i" id="nmPw" type="text" placeholder="Sandi awal (≥8, huruf+angka)"><select class="i" id="nmRole"><option>member</option><option>viewer</option><option>manager</option><option>admin</option></select></div><button class="btn primary" id="nmAdd" style="margin-top:10px">Tambah</button></div>' : '');
+      return Promise.all([api('GET', '/org/members', {}, { noCache: true }), api('GET', '/departments').catch(function () { return []; })]).then(function (rs) {
+        var list = rs[0], depts = rs[1];
+        var deptOpts = function (sel) { return '<option value="">— tanpa departemen —</option>' + depts.map(function (d) { return '<option value="' + esc(d.id) + '"' + (d.id === sel ? ' selected' : '') + '>' + esc(d.name) + '</option>'; }).join(''); };
+        el.innerHTML = '<div class="card" style="padding:0"><div class="tbl-wrap" style="border:0"><table class="t"><thead><tr><th>Nama</th><th>Jabatan</th><th class="hide-m">Email</th><th>Peran</th><th>Status</th><th class="hide-m">Login terakhir</th><th></th></tr></thead><tbody>' + list.map(function (m) { return '<tr><td><b>' + esc(m.name) + '</b></td><td class="small">' + (m.job_title ? esc(m.job_title) : '<span class="muted">—</span>') + (m.department ? '<div class="muted">' + esc(m.department) + '</div>' : '') + (can('member.manage') ? ' <a href="#" class="small" data-job="' + esc(m.id) + '">ubah</a>' : '') + '</td><td class="small hide-m">' + esc(m.email) + '</td><td>' + (can('member.manage') && m.user_id !== S.me.user.id ? '<select class="i" data-role="' + esc(m.id) + '" style="width:auto;padding:4px 8px">' + ['viewer', 'member', 'manager', 'admin', 'owner'].map(function (r) { return '<option' + (r === m.role ? ' selected' : '') + '>' + r + '</option>'; }).join('') + '</select>' : '<span class="chip plain">' + esc(m.role) + '</span>') + '</td><td>' + chip(m.status) + '</td><td class="hide-m small muted">' + fmtDate(m.last_login_at) + '</td><td>' + (can('member.manage') && m.user_id !== S.me.user.id ? '<button class="btn sm" data-sus="' + esc(m.id) + '" data-st="' + (m.status === 'active' ? 'suspended' : 'active') + '">' + (m.status === 'active' ? 'Tangguhkan' : 'Aktifkan') + '</button> <button class="btn sm" data-pw="' + esc(m.id) + '">Reset sandi</button>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div></div>' +
+          (can('member.manage') ? '<div class="card" style="margin-top:14px"><h3>Tambah anggota</h3><div class="grid g4"><input class="i" id="nmName" placeholder="Nama"><input class="i" id="nmEmail" type="email" placeholder="Email"><input class="i" id="nmPw" type="text" placeholder="Sandi awal (≥8, huruf+angka)"><select class="i" id="nmRole"><option>member</option><option>viewer</option><option>manager</option><option>admin</option></select><input class="i" id="nmJob" maxlength="80" placeholder="Jabatan (mis. Staf Keuangan)"><select class="i" id="nmDept">' + deptOpts('') + '</select></div><button class="btn primary" id="nmAdd" style="margin-top:10px">Tambah</button></div>' : '');
         $$('[data-role]', el).forEach(function (s) { s.onchange = function () { api('PUT', '/org/members/' + s.getAttribute('data-role'), { role: s.value }).then(function () { toast('Peran diubah.', 'ok'); }).catch(function (e) { fail(e); route(); }); }; });
         $$('[data-sus]', el).forEach(function (b) { b.onclick = function () { api('PUT', '/org/members/' + b.getAttribute('data-sus'), { status: b.getAttribute('data-st') }).then(function () { route(); }).catch(fail); }; });
         $$('[data-pw]', el).forEach(function (b) { b.onclick = function () { promptBox('Reset kata sandi', 'Kata sandi baru (≥8, huruf + angka)').then(function (pw) { if (pw) api('PUT', '/org/members/' + b.getAttribute('data-pw'), { password: pw }).then(function () { toast('Kata sandi direset.', 'ok'); }).catch(fail); }); }; });
-        var add = $('#nmAdd'); if (add) add.onclick = function () { api('POST', '/org/members', { name: $('#nmName').value, email: $('#nmEmail').value, password: $('#nmPw').value, role: $('#nmRole').value }).then(function () { toast('Anggota ditambahkan.', 'ok'); route(); }).catch(fail); };
+        var add = $('#nmAdd'); if (add) add.onclick = function () { api('POST', '/org/members', { name: $('#nmName').value, email: $('#nmEmail').value, password: $('#nmPw').value, role: $('#nmRole').value, job_title: $('#nmJob').value, department_id: $('#nmDept').value }).then(function () { toast('Anggota ditambahkan.', 'ok'); route(); }).catch(fail); };
+        $$('[data-job]', el).forEach(function (a) {
+          a.onclick = function (ev) {
+            ev.preventDefault(); var m = list.filter(function (x) { return x.id === a.getAttribute('data-job'); })[0];
+            modal({ title: 'Jabatan — ' + m.name, body: '<label class="f">Jabatan<input class="i" id="mjT" maxlength="80" value="' + esc(m.job_title) + '" placeholder="mis. Kepala Bagian Keuangan"></label><label class="f">Departemen<select class="i" id="mjD">' + deptOpts(m.department_id) + '</select></label>',
+              buttons: [{ text: 'Batal' }, { text: 'Simpan', cls: 'primary', fn: function (bg) { return api('PUT', '/org/members/' + m.id, { job_title: $('#mjT', bg).value, department_id: $('#mjD', bg).value }).then(function () { if (m.user_id === S.me.user.id) { S.me.user.job_title = $('#mjT', bg).value; store.set('me', S.me); } toast('Jabatan disimpan.', 'ok'); route(); }); } }] });
+          };
+        });
       });
     },
     ai: function (el) {
@@ -1030,7 +1448,7 @@
   // =====================================================================
   VIEWS.profile = function (v) {
     var u = S.me.user;
-    v.innerHTML = '<h1>Profil saya</h1><div class="grid g2"><div class="card col"><div class="row">' + avatarHtml(u, true) + '<div class="col" style="gap:6px"><b style="font-size:16px">' + esc(u.name) + '</b><span class="muted small">' + esc(u.email) + ' · ' + esc(S.me.role) + '</span><div class="row"><button class="btn sm" id="pUp">Ganti foto</button>' + (u.photo ? '<button class="btn sm ghost" id="pRm">Hapus foto</button>' : '') + '</div><span class="small muted">Klik foto untuk zoom (pinch / scroll / ketuk dua kali).</span></div></div>' +
+    v.innerHTML = '<h1>Profil saya</h1><div class="grid g2"><div class="card col"><div class="row">' + avatarHtml(u, true) + '<div class="col" style="gap:6px"><b style="font-size:16px">' + esc(u.name) + '</b>' + (u.job_title || u.department ? '<span class="small"><b>' + esc(u.job_title || '') + '</b>' + (u.department ? (u.job_title ? ' · ' : '') + esc(u.department) : '') + '</span>' : '') + '<span class="muted small">' + esc(u.email) + ' · ' + esc(S.me.role) + '</span><div class="row"><button class="btn sm" id="pUp">Ganti foto</button>' + (u.photo ? '<button class="btn sm ghost" id="pRm">Hapus foto</button>' : '') + '</div><span class="small muted">Klik foto untuk zoom (pinch / scroll / ketuk dua kali).</span></div></div>' +
       '<label class="f">Nama tampilan<input class="i" id="pName" maxlength="80" value="' + esc(u.name) + '"></label><button class="btn primary" id="pSave" style="align-self:flex-start">Simpan profil</button></div>' +
       '<div class="card col"><h3>Ubah kata sandi</h3><label class="f">Kata sandi lama<input class="i" type="password" id="pOld" autocomplete="current-password"></label><label class="f">Kata sandi baru<input class="i" type="password" id="pNew" autocomplete="new-password"><span>Minimal 8 karakter, huruf + angka. Sesi lain akan dikeluarkan.</span></label><button class="btn" id="pPw" style="align-self:flex-start">Ubah kata sandi</button><hr style="border:0;border-top:1px solid var(--border);width:100%"><a class="btn" href="#/about" style="align-self:flex-start">' + ico('shield', 15) + 'Tentang aplikasi, S&amp;K &amp; Privasi</a><button class="btn danger" id="pOut" style="align-self:flex-start">' + ico('out', 15) + 'Keluar</button></div></div>';
     var av = $('.avatar.lg', v); if (av && u.photo) av.onclick = function () { zoomImage(u.photo, 'Foto profil'); };
